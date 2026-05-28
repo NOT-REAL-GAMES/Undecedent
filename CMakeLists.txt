@@ -23,6 +23,9 @@ find_package(OpenGL REQUIRED)
 add_executable(Undecedent
     main.cpp
     src/csg.cpp
+    src/map_io.cpp
+    src/runtime_geometry.cpp
+    src/runtime_world.cpp
     src/triangulator.cpp
     glad/src/glad.c
 )
@@ -52,3 +55,29 @@ add_executable(UndecedentCsgTests
 )
 
 target_include_directories(UndecedentCsgTests PRIVATE include)
+
+add_executable(UndecedentRuntimeGeometryTests
+    tests/runtime_geometry_tests.cpp
+    src/csg.cpp
+    src/runtime_geometry.cpp
+    src/triangulator.cpp
+)
+
+target_include_directories(UndecedentRuntimeGeometryTests PRIVATE include)
+
+add_executable(UndecedentRuntimeWorldTests
+    tests/runtime_world_tests.cpp
+    src/csg.cpp
+    src/runtime_world.cpp
+    src/triangulator.cpp
+)
+
+target_include_directories(UndecedentRuntimeWorldTests PRIVATE include)
+
+add_executable(UndecedentMapIoTests
+    tests/map_io_tests.cpp
+    src/map_io.cpp
+    src/triangulator.cpp
+)
+
+target_include_directories(UndecedentMapIoTests PRIVATE include)

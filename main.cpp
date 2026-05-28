@@ -1,15 +1,25 @@
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <mutex>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_dialog.h>
 
 #include "undecedent/csg.hpp"
+#include "undecedent/map_io.hpp"
+#include "undecedent/runtime_geometry.hpp"
+#include "undecedent/runtime_world.hpp"
 #include "undecedent/triangulator.hpp"
 
 namespace {
@@ -27,10 +37,17 @@ constexpr float kEditorScrollDeadzone = 0.02F;
 constexpr float kEditorScrollLogStrength = 4.0F;
 constexpr float kEditorMaxScrollDelta = 64.0F;
 constexpr float kEditorCameraSmoothRate = 14.0F;
+constexpr float kGameMoveSpeed = 180.0F;
+constexpr float kGameLookSpeed = 1.9F;
+constexpr float kGameNearPlane = 1.0F;
+constexpr float kGameFarPlane = 20000.0F;
+constexpr float kSectorHeightStep = 8.0F;
+constexpr float kSectorMinHeight = 8.0F;
 constexpr float kScaleIndicatorTargetPixels = 160.0F;
 constexpr float kScaleIndicatorMinPixels = 80.0F;
 constexpr float kScaleIndicatorMaxPixels = 190.0F;
 constexpr float kCloseVertexPixels = 12.0F;
+constexpr float kFpsCounterUpdateSeconds = 0.25F;
 
 struct EditorCamera {
     float x = 0.0F;
@@ -42,22 +59,127 @@ struct EditorCamera {
     bool panning = false;
 };
 
+struct GameCamera {
+    float x = 0.0F;
+    float y = 64.0F;
+    float z = 220.0F;
+    float yaw = 0.0F;
+    float pitch = 0.0F;
+};
+
+struct FullscreenState {
+    bool exclusive = false;
+    int windowed_x = SDL_WINDOWPOS_UNDEFINED;
+    int windowed_y = SDL_WINDOWPOS_UNDEFINED;
+    int windowed_w = kWindowWidth;
+    int windowed_h = kWindowHeight;
+};
+
+struct RuntimeRenderVertex {
+    float x = 0.0F;
+    float y = 0.0F;
+    float z = 0.0F;
+    float r = 1.0F;
+    float g = 1.0F;
+    float b = 1.0F;
+};
+
+struct RuntimeRenderRange {
+    GLint first_vertex = 0;
+    GLsizei vertex_count = 0;
+};
+
+struct RuntimeRenderCache {
+    GLuint vertex_buffer = 0;
+    GLsizei total_vertices = 0;
+    std::vector<RuntimeRenderRange> sector_ranges;
+};
+
+struct ProfilerDisplay {
+    double frame_ms = 0.0;
+    double events_ms = 0.0;
+    double update_ms = 0.0;
+    double render_ms = 0.0;
+    double overlay_ms = 0.0;
+    double finish_ms = 0.0;
+    double swap_ms = 0.0;
+    int fps = 0;
+    int total_triangles = 0;
+    int visible_triangles = 0;
+    int sectors = 0;
+    int walls = 0;
+};
+
+struct ProfilerAccumulator {
+    double frame_ms = 0.0;
+    double events_ms = 0.0;
+    double update_ms = 0.0;
+    double render_ms = 0.0;
+    double overlay_ms = 0.0;
+    double finish_ms = 0.0;
+    double swap_ms = 0.0;
+    double seconds = 0.0;
+    int frames = 0;
+};
+
+struct BenchmarkState {
+    bool enabled = false;
+    bool skip_clear = false;
+    bool skip_swap = false;
+};
+
+struct BenchmarkAccumulator {
+    double frame_ms = 0.0;
+    double events_ms = 0.0;
+    double update_ms = 0.0;
+    double render_ms = 0.0;
+    double overlay_ms = 0.0;
+    double finish_ms = 0.0;
+    double swap_ms = 0.0;
+    double seconds = 0.0;
+    int frames = 0;
+};
+
+struct MapDialogRequests {
+    std::mutex mutex;
+    std::string pending_save_path;
+    std::string pending_load_path;
+    std::vector<std::string> messages;
+};
+
 enum class PlaneToolMode {
     None,
     DrawOuter,
     DrawHole,
 };
 
+struct CommittedVertexRef {
+    std::size_t sector = 0;
+    std::size_t vertex = 0;
+};
+
 struct EditorWorld {
     std::vector<undecedent::SectorPlane> sectors;
     std::vector<undecedent::Vec2> draft_vertices;
+    std::vector<undecedent::SectorPlane> committed_drag_snapshot;
+    std::vector<CommittedVertexRef> dragged_committed_refs;
+    std::set<int> selected_sectors;
+    undecedent::RuntimeWorld runtime_world;
+    RuntimeRenderCache runtime_render_cache;
     undecedent::TriangulationResult draft_result;
     undecedent::Vec2 snapped_mouse;
+    undecedent::Vec2 hovered_committed_vertex;
+    undecedent::Vec2 dragged_committed_vertex;
     int dragged_draft_vertex = -1;
     int selected_sector = -1;
     PlaneToolMode plane_tool = PlaneToolMode::None;
+    bool has_hovered_committed_vertex = false;
+    bool has_dragged_committed_vertex = false;
     bool dragged_draft_vertex_moved = false;
+    bool dragged_committed_vertex_moved = false;
 };
+
+void frame_game_camera_on_sectors(GameCamera& camera, const std::vector<undecedent::SectorPlane>& sectors);
 
 bool configure_gl_attributes() {
     bool ok = true;
@@ -69,8 +191,220 @@ bool configure_gl_attributes() {
     return ok;
 }
 
+double ticks_to_ms(const Uint64 start, const Uint64 end) {
+    return static_cast<double>(end - start) / 1'000'000.0;
+}
+
+std::string format_ms(const double milliseconds) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(2) << milliseconds;
+    return stream.str();
+}
+
+std::string format_fps(const double fps) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(fps >= 1000.0 ? 0 : 1) << fps;
+    return stream.str();
+}
+
+std::string format_display_mode(const SDL_DisplayMode& mode) {
+    std::ostringstream stream;
+    stream << mode.w << 'x' << mode.h;
+    if (mode.refresh_rate > 0.0F) {
+        stream << '@' << std::fixed << std::setprecision(2) << mode.refresh_rate << "Hz";
+    }
+    return stream.str();
+}
+
 void log_sdl_error(const char* action) {
     std::cerr << action << ": " << SDL_GetError() << '\n';
+}
+
+bool enter_exclusive_fullscreen(SDL_Window* window, FullscreenState& fullscreen_state) {
+    if (fullscreen_state.exclusive) {
+        return true;
+    }
+
+    SDL_GetWindowPosition(window, &fullscreen_state.windowed_x, &fullscreen_state.windowed_y);
+    SDL_GetWindowSize(window, &fullscreen_state.windowed_w, &fullscreen_state.windowed_h);
+
+    const SDL_DisplayID display_id = SDL_GetDisplayForWindow(window);
+    if (display_id == 0) {
+        log_sdl_error("SDL_GetDisplayForWindow failed");
+        return false;
+    }
+
+    const SDL_DisplayMode* desktop_mode = SDL_GetDesktopDisplayMode(display_id);
+    if (desktop_mode == nullptr) {
+        log_sdl_error("SDL_GetDesktopDisplayMode failed");
+        return false;
+    }
+
+    SDL_DisplayMode fullscreen_mode{};
+    if (!SDL_GetClosestFullscreenDisplayMode(
+            display_id,
+            desktop_mode->w,
+            desktop_mode->h,
+            desktop_mode->refresh_rate,
+            true,
+            &fullscreen_mode
+        )) {
+        log_sdl_error("SDL_GetClosestFullscreenDisplayMode failed");
+        return false;
+    }
+
+    if (!SDL_SetWindowFullscreenMode(window, &fullscreen_mode)) {
+        log_sdl_error("SDL_SetWindowFullscreenMode failed");
+        return false;
+    }
+
+    if (!SDL_SetWindowFullscreen(window, true)) {
+        log_sdl_error("SDL_SetWindowFullscreen failed");
+        SDL_SetWindowFullscreenMode(window, nullptr);
+        return false;
+    }
+
+    if (!SDL_SyncWindow(window)) {
+        log_sdl_error("SDL_SyncWindow after fullscreen enter failed");
+        SDL_SetWindowFullscreen(window, false);
+        SDL_SetWindowFullscreenMode(window, nullptr);
+        return false;
+    }
+
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0) {
+        std::cerr << "Exclusive fullscreen request was accepted but the window did not enter fullscreen\n";
+        SDL_SetWindowFullscreenMode(window, nullptr);
+        return false;
+    }
+
+    fullscreen_state.exclusive = true;
+    std::cout << "Exclusive fullscreen enabled: " << format_display_mode(fullscreen_mode) << '\n';
+    return true;
+}
+
+void exit_exclusive_fullscreen(SDL_Window* window, FullscreenState& fullscreen_state) {
+    if (!fullscreen_state.exclusive) {
+        return;
+    }
+
+    if (!SDL_SetWindowFullscreen(window, false)) {
+        log_sdl_error("SDL_SetWindowFullscreen(false) failed");
+        return;
+    }
+
+    if (!SDL_SyncWindow(window)) {
+        log_sdl_error("SDL_SyncWindow after fullscreen exit failed");
+    }
+
+    if (!SDL_SetWindowFullscreenMode(window, nullptr)) {
+        log_sdl_error("SDL_SetWindowFullscreenMode(nullptr) failed");
+    }
+
+    SDL_SetWindowSize(window, fullscreen_state.windowed_w, fullscreen_state.windowed_h);
+    SDL_SetWindowPosition(window, fullscreen_state.windowed_x, fullscreen_state.windowed_y);
+    fullscreen_state.exclusive = false;
+    std::cout << "Exclusive fullscreen disabled\n";
+}
+
+void toggle_exclusive_fullscreen(SDL_Window* window, FullscreenState& fullscreen_state) {
+    if (fullscreen_state.exclusive) {
+        exit_exclusive_fullscreen(window, fullscreen_state);
+    } else {
+        enter_exclusive_fullscreen(window, fullscreen_state);
+    }
+}
+
+void queue_dialog_message(MapDialogRequests& requests, std::string message) {
+    std::lock_guard<std::mutex> lock(requests.mutex);
+    requests.messages.push_back(std::move(message));
+}
+
+void SDLCALL save_map_dialog_callback(void* userdata, const char* const* filelist, int) {
+    auto* requests = static_cast<MapDialogRequests*>(userdata);
+    if (filelist == nullptr) {
+        queue_dialog_message(*requests, std::string("Save dialog failed: ") + SDL_GetError());
+        return;
+    }
+
+    if (filelist[0] == nullptr) {
+        queue_dialog_message(*requests, "Save canceled.");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(requests->mutex);
+    requests->pending_save_path = filelist[0];
+}
+
+void SDLCALL load_map_dialog_callback(void* userdata, const char* const* filelist, int) {
+    auto* requests = static_cast<MapDialogRequests*>(userdata);
+    if (filelist == nullptr) {
+        queue_dialog_message(*requests, std::string("Load dialog failed: ") + SDL_GetError());
+        return;
+    }
+
+    if (filelist[0] == nullptr) {
+        queue_dialog_message(*requests, "Load canceled.");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(requests->mutex);
+    requests->pending_load_path = filelist[0];
+}
+
+const SDL_DialogFileFilter* map_dialog_filters() {
+    static const SDL_DialogFileFilter filters[] = {
+        {"Undecedent Map", "udmap"},
+    };
+    return filters;
+}
+
+void show_save_map_dialog(SDL_Window* window, MapDialogRequests& requests) {
+    SDL_ShowSaveFileDialog(save_map_dialog_callback, &requests, window, map_dialog_filters(), 1, nullptr);
+    std::cout << "Opening save dialog...\n";
+}
+
+void show_load_map_dialog(SDL_Window* window, MapDialogRequests& requests) {
+    SDL_ShowOpenFileDialog(load_map_dialog_callback, &requests, window, map_dialog_filters(), 1, nullptr, false);
+    std::cout << "Opening load dialog...\n";
+}
+
+std::filesystem::path normalize_save_map_path(std::filesystem::path path) {
+    if (path.extension().empty()) {
+        path += ".udmap";
+    }
+    return path;
+}
+
+void print_benchmark_report(
+    const BenchmarkState& benchmark,
+    const BenchmarkAccumulator& accumulator,
+    const bool editor_enabled,
+    const int total_triangles,
+    const int visible_triangles,
+    const int sectors,
+    const int walls
+) {
+    if (accumulator.frames <= 0 || accumulator.seconds <= 0.0) {
+        return;
+    }
+
+    const double inv_frames = 1.0 / static_cast<double>(accumulator.frames);
+    std::cout
+        << "[benchmark] fps=" << format_fps(static_cast<double>(accumulator.frames) / accumulator.seconds)
+        << " frame=" << format_ms(accumulator.frame_ms * inv_frames) << "ms"
+        << " events=" << format_ms(accumulator.events_ms * inv_frames) << "ms"
+        << " update=" << format_ms(accumulator.update_ms * inv_frames) << "ms"
+        << " render=" << format_ms(accumulator.render_ms * inv_frames) << "ms"
+        << " overlay=" << format_ms(accumulator.overlay_ms * inv_frames) << "ms"
+        << " finish=" << format_ms(accumulator.finish_ms * inv_frames) << "ms"
+        << " swap=" << format_ms(accumulator.swap_ms * inv_frames) << "ms"
+        << " clear=" << (benchmark.skip_clear ? "skip" : "on")
+        << " swap_mode=" << (benchmark.skip_swap ? "skip" : "on")
+        << " mode=" << (editor_enabled ? "editor" : "game")
+        << " tris=" << total_triangles << '/' << visible_triangles
+        << " sectors=" << sectors
+        << " walls=" << walls
+        << std::endl;
 }
 
 float screen_to_ndc_x(const float screen_x, const int width) {
@@ -199,6 +533,125 @@ bool same_editor_point(const undecedent::Vec2 a, const undecedent::Vec2 b) {
     return distance_squared(a, b) <= (undecedent::kGeometryEpsilon * undecedent::kGeometryEpsilon);
 }
 
+void runtime_triangle_color(const undecedent::RuntimeTriangle& triangle, float& r, float& g, float& b) {
+    const float average_y = (triangle.a.y + triangle.b.y + triangle.c.y) / 3.0F;
+    if (average_y <= 0.001F) {
+        r = 0.24F;
+        g = 0.58F;
+        b = 0.52F;
+    } else if (std::abs(triangle.a.y - triangle.b.y) <= 0.001F &&
+        std::abs(triangle.b.y - triangle.c.y) <= 0.001F) {
+        r = 0.11F;
+        g = 0.25F;
+        b = 0.31F;
+    } else {
+        r = 0.18F;
+        g = 0.42F;
+        b = 0.45F;
+    }
+}
+
+void append_runtime_vertex(
+    std::vector<RuntimeRenderVertex>& vertices,
+    const undecedent::Vec3 point,
+    const float r,
+    const float g,
+    const float b
+) {
+    vertices.push_back(RuntimeRenderVertex{point.x, point.y, point.z, r, g, b});
+}
+
+void append_runtime_triangle(
+    std::vector<RuntimeRenderVertex>& vertices,
+    const undecedent::RuntimeTriangle& triangle
+) {
+    float r = 1.0F;
+    float g = 1.0F;
+    float b = 1.0F;
+    runtime_triangle_color(triangle, r, g, b);
+    append_runtime_vertex(vertices, triangle.a, r, g, b);
+    append_runtime_vertex(vertices, triangle.b, r, g, b);
+    append_runtime_vertex(vertices, triangle.c, r, g, b);
+}
+
+void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const undecedent::RuntimeWorld& world) {
+    std::vector<RuntimeRenderVertex> vertices;
+    render_cache.sector_ranges.assign(world.sectors.size(), RuntimeRenderRange{});
+
+    for (std::size_t sector_index = 0; sector_index < world.sectors.size(); ++sector_index) {
+        RuntimeRenderRange range{};
+        range.first_vertex = static_cast<GLint>(vertices.size());
+        for (const undecedent::RuntimeTaggedTriangle& tagged_triangle : world.triangles) {
+            if (tagged_triangle.sector_id != static_cast<int>(sector_index)) {
+                continue;
+            }
+            append_runtime_triangle(vertices, tagged_triangle.triangle);
+        }
+        range.vertex_count = static_cast<GLsizei>(vertices.size()) - range.first_vertex;
+        render_cache.sector_ranges[sector_index] = range;
+    }
+
+    if (render_cache.vertex_buffer == 0) {
+        glGenBuffers(1, &render_cache.vertex_buffer);
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(vertices.size() * sizeof(RuntimeRenderVertex)),
+        vertices.empty() ? nullptr : vertices.data(),
+        GL_STATIC_DRAW
+    );
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    render_cache.total_vertices = static_cast<GLsizei>(vertices.size());
+}
+
+void destroy_runtime_render_cache(RuntimeRenderCache& render_cache) {
+    if (render_cache.vertex_buffer != 0) {
+        glDeleteBuffers(1, &render_cache.vertex_buffer);
+    }
+    render_cache = {};
+}
+
+bool is_sector_selected(const EditorWorld& editor_world, const int sector_index) {
+    return editor_world.selected_sectors.contains(sector_index);
+}
+
+void clear_sector_selection(EditorWorld& editor_world) {
+    editor_world.selected_sectors.clear();
+    editor_world.selected_sector = -1;
+}
+
+void select_single_sector(EditorWorld& editor_world, const int sector_index) {
+    editor_world.selected_sectors.clear();
+    if (sector_index >= 0 && sector_index < static_cast<int>(editor_world.sectors.size())) {
+        editor_world.selected_sectors.insert(sector_index);
+        editor_world.selected_sector = sector_index;
+    } else {
+        editor_world.selected_sector = -1;
+    }
+}
+
+void toggle_sector_selection(EditorWorld& editor_world, const int sector_index) {
+    if (sector_index < 0 || sector_index >= static_cast<int>(editor_world.sectors.size())) {
+        return;
+    }
+
+    if (editor_world.selected_sectors.contains(sector_index)) {
+        editor_world.selected_sectors.erase(sector_index);
+        editor_world.selected_sector = editor_world.selected_sectors.empty()
+            ? -1
+            : *editor_world.selected_sectors.rbegin();
+    } else {
+        editor_world.selected_sectors.insert(sector_index);
+        editor_world.selected_sector = sector_index;
+    }
+}
+
+std::vector<int> selected_sector_indices(const EditorWorld& editor_world) {
+    return std::vector<int>(editor_world.selected_sectors.begin(), editor_world.selected_sectors.end());
+}
+
 bool draft_contains_point(const EditorWorld& editor_world, const undecedent::Vec2 point) {
     return std::any_of(
         editor_world.draft_vertices.begin(),
@@ -253,6 +706,135 @@ int draft_vertex_at_screen(
     return nearest;
 }
 
+bool committed_vertex_at_screen(
+    const EditorWorld& editor_world,
+    const EditorCamera& camera,
+    const int width,
+    const int height,
+    const float screen_x,
+    const float screen_y,
+    undecedent::Vec2& out_vertex
+) {
+    bool found = false;
+    float nearest_distance = kCloseVertexPixels * kCloseVertexPixels;
+
+    for (const undecedent::SectorPlane& sector : editor_world.sectors) {
+        for (const undecedent::Vec2 vertex : sector.outer.vertices) {
+            const float vertex_x = world_to_screen_x(vertex.x, width, camera);
+            const float vertex_y = world_to_screen_y(vertex.y, height, camera);
+            const float dx = vertex_x - screen_x;
+            const float dy = vertex_y - screen_y;
+            const float distance = (dx * dx) + (dy * dy);
+            if (distance <= nearest_distance) {
+                found = true;
+                nearest_distance = distance;
+                out_vertex = vertex;
+            }
+        }
+    }
+
+    return found;
+}
+
+std::vector<CommittedVertexRef> matching_committed_vertices(
+    const EditorWorld& editor_world,
+    const undecedent::Vec2 point
+) {
+    std::vector<CommittedVertexRef> refs;
+    for (std::size_t sector_index = 0; sector_index < editor_world.sectors.size(); ++sector_index) {
+        const undecedent::SectorPlane& sector = editor_world.sectors[sector_index];
+        for (std::size_t vertex_index = 0; vertex_index < sector.outer.vertices.size(); ++vertex_index) {
+            if (same_editor_point(sector.outer.vertices[vertex_index], point)) {
+                refs.push_back(CommittedVertexRef{sector_index, vertex_index});
+            }
+        }
+    }
+    return refs;
+}
+
+bool is_dragged_committed_ref(
+    const EditorWorld& editor_world,
+    const std::size_t sector_index,
+    const std::size_t vertex_index
+) {
+    return std::any_of(
+        editor_world.dragged_committed_refs.begin(),
+        editor_world.dragged_committed_refs.end(),
+        [sector_index, vertex_index](const CommittedVertexRef ref) {
+            return ref.sector == sector_index && ref.vertex == vertex_index;
+        }
+    );
+}
+
+void update_committed_vertex_hover(
+    EditorWorld& editor_world,
+    const EditorCamera& camera,
+    const int width,
+    const int height,
+    const float mouse_x,
+    const float mouse_y
+) {
+    if (editor_world.plane_tool != PlaneToolMode::None || editor_world.has_dragged_committed_vertex) {
+        editor_world.has_hovered_committed_vertex = false;
+        return;
+    }
+
+    editor_world.has_hovered_committed_vertex = committed_vertex_at_screen(
+        editor_world,
+        camera,
+        width,
+        height,
+        mouse_x,
+        mouse_y,
+        editor_world.hovered_committed_vertex
+    );
+}
+
+void move_dragged_committed_vertices(EditorWorld& editor_world, const undecedent::Vec2 point) {
+    for (const CommittedVertexRef ref : editor_world.dragged_committed_refs) {
+        if (ref.sector >= editor_world.sectors.size()) {
+            continue;
+        }
+        undecedent::SectorPlane& sector = editor_world.sectors[ref.sector];
+        if (ref.vertex >= sector.outer.vertices.size()) {
+            continue;
+        }
+        sector.outer.vertices[ref.vertex] = point;
+        rebuild_sector(sector);
+    }
+
+    editor_world.dragged_committed_vertex = point;
+}
+
+void rebuild_runtime_geometry(EditorWorld& editor_world) {
+    editor_world.runtime_world = undecedent::build_runtime_world(editor_world.sectors);
+    rebuild_runtime_render_cache(editor_world.runtime_render_cache, editor_world.runtime_world);
+}
+
+void finish_committed_vertex_drag(EditorWorld& editor_world) {
+    if (!editor_world.has_dragged_committed_vertex) {
+        return;
+    }
+
+    if (editor_world.dragged_committed_vertex_moved) {
+        const undecedent::CsgAddResult rebuild_result = undecedent::csg_rebuild_sectors(editor_world.sectors);
+        if (rebuild_result.ok) {
+            editor_world.sectors = rebuild_result.sectors;
+            select_single_sector(editor_world, editor_world.selected_sector);
+            rebuild_runtime_geometry(editor_world);
+            std::cout << "Rebuilt sector topology after vertex move; sectors: " << editor_world.sectors.size() << '\n';
+        } else {
+            editor_world.sectors = editor_world.committed_drag_snapshot;
+            std::cout << "Rejected vertex move: " << rebuild_result.message << '\n';
+        }
+    }
+
+    editor_world.committed_drag_snapshot.clear();
+    editor_world.dragged_committed_refs.clear();
+    editor_world.has_dragged_committed_vertex = false;
+    editor_world.dragged_committed_vertex_moved = false;
+}
+
 int sector_at_point(const EditorWorld& editor_world, const undecedent::Vec2 point) {
     for (int i = static_cast<int>(editor_world.sectors.size()) - 1; i >= 0; --i) {
         const undecedent::SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(i)];
@@ -283,27 +865,6 @@ undecedent::TriangulationResult draft_preview_result(const EditorWorld& editor_w
         return editor_world.draft_result;
     }
 
-    if (editor_world.plane_tool == PlaneToolMode::DrawHole) {
-        if (editor_world.selected_sector < 0 ||
-            editor_world.selected_sector >= static_cast<int>(editor_world.sectors.size())) {
-            return undecedent::TriangulationResult{
-                undecedent::TriangulationStatus::TriangulationFailed,
-                "No selected sector for hole drawing.",
-                {}
-            };
-        }
-
-        const undecedent::SectorPlane& sector =
-            editor_world.sectors[static_cast<std::size_t>(editor_world.selected_sector)];
-        if (!point_in_sector(sector, editor_world.snapped_mouse)) {
-            return undecedent::TriangulationResult{
-                undecedent::TriangulationStatus::HoleOutsideOuter,
-                "Preview vertex is outside the selected sector.",
-                {}
-            };
-        }
-    }
-
     std::vector<undecedent::Vec2> preview_vertices = editor_world.draft_vertices;
     const bool closes_loop =
         preview_vertices.size() >= 3 &&
@@ -330,15 +891,12 @@ undecedent::TriangulationResult draft_preview_result(const EditorWorld& editor_w
     }
 
     const undecedent::PolygonLoop preview_loop{preview_vertices};
-    if (editor_world.plane_tool == PlaneToolMode::DrawOuter) {
+    if (editor_world.plane_tool == PlaneToolMode::DrawOuter ||
+        editor_world.plane_tool == PlaneToolMode::DrawHole) {
         return undecedent::triangulate_polygon(preview_loop);
     }
 
-    const undecedent::SectorPlane& sector =
-        editor_world.sectors[static_cast<std::size_t>(editor_world.selected_sector)];
-    std::vector<undecedent::PolygonLoop> holes = sector.holes;
-    holes.push_back(preview_loop);
-    return undecedent::triangulate_polygon(sector.outer, holes);
+    return {};
 }
 
 void refresh_draft(EditorWorld& editor_world) {
@@ -351,25 +909,15 @@ void refresh_draft(EditorWorld& editor_world) {
         return;
     }
 
-    if (editor_world.plane_tool == PlaneToolMode::DrawOuter) {
+    if (editor_world.plane_tool == PlaneToolMode::DrawOuter ||
+        editor_world.plane_tool == PlaneToolMode::DrawHole) {
         editor_world.draft_result = undecedent::triangulate_polygon(draft_loop(editor_world));
-        return;
-    }
-
-    if (editor_world.plane_tool == PlaneToolMode::DrawHole &&
-        editor_world.selected_sector >= 0 &&
-        editor_world.selected_sector < static_cast<int>(editor_world.sectors.size())) {
-        const undecedent::SectorPlane& sector =
-            editor_world.sectors[static_cast<std::size_t>(editor_world.selected_sector)];
-        std::vector<undecedent::PolygonLoop> holes = sector.holes;
-        holes.push_back(draft_loop(editor_world));
-        editor_world.draft_result = undecedent::triangulate_polygon(sector.outer, holes);
         return;
     }
 
     editor_world.draft_result = undecedent::TriangulationResult{
         undecedent::TriangulationStatus::TriangulationFailed,
-        "No selected sector for hole drawing.",
+        "No active plane tool.",
         {}
     };
 }
@@ -405,9 +953,8 @@ void start_outer_plane(EditorWorld& editor_world) {
 }
 
 void start_hole_plane(EditorWorld& editor_world) {
-    if (editor_world.selected_sector < 0 ||
-        editor_world.selected_sector >= static_cast<int>(editor_world.sectors.size())) {
-        std::cout << "Select a sector before drawing a hole.\n";
+    if (editor_world.sectors.empty()) {
+        std::cout << "Create a sector before drawing a hole.\n";
         return;
     }
 
@@ -433,24 +980,166 @@ bool commit_plane_tool(EditorWorld& editor_world) {
         }
 
         editor_world.sectors = csg_result.sectors;
-        editor_world.selected_sector = editor_world.sectors.empty()
-            ? -1
-            : static_cast<int>(editor_world.sectors.size()) - 1;
+        select_single_sector(
+            editor_world,
+            editor_world.sectors.empty() ? -1 : static_cast<int>(editor_world.sectors.size()) - 1
+        );
+        rebuild_runtime_geometry(editor_world);
         cancel_plane_tool(editor_world);
         std::cout << "Committed CSG add; sectors: " << editor_world.sectors.size() << '\n';
         return true;
     }
 
     if (editor_world.plane_tool == PlaneToolMode::DrawHole) {
-        undecedent::SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(editor_world.selected_sector)];
-        sector.holes.push_back(draft_loop(editor_world));
-        rebuild_sector(sector);
+        const undecedent::CsgAddResult csg_result =
+            undecedent::csg_subtract_sector(editor_world.sectors, draft_loop(editor_world));
+        if (!csg_result.ok) {
+            std::cout << "Cannot commit CSG subtract: " << csg_result.message << '\n';
+            return false;
+        }
+
+        editor_world.sectors = csg_result.sectors;
+        select_single_sector(
+            editor_world,
+            editor_world.sectors.empty()
+                ? -1
+                : std::min(editor_world.selected_sector, static_cast<int>(editor_world.sectors.size()) - 1)
+        );
+        rebuild_runtime_geometry(editor_world);
         cancel_plane_tool(editor_world);
-        std::cout << "Committed hole for sector " << editor_world.selected_sector << '\n';
+        std::cout << "Committed CSG subtract; sectors: " << editor_world.sectors.size() << '\n';
         return true;
     }
 
     return false;
+}
+
+bool merge_selected_sectors(EditorWorld& editor_world) {
+    const std::vector<int> selected = selected_sector_indices(editor_world);
+    if (selected.size() < 2) {
+        std::cout << "Select at least two connected sectors before pressing M.\n";
+        return false;
+    }
+
+    const undecedent::CsgAddResult merge_result = undecedent::csg_merge_sectors(editor_world.sectors, selected);
+    if (!merge_result.ok) {
+        std::cout << "Cannot merge sectors: " << merge_result.message << '\n';
+        return false;
+    }
+
+    editor_world.sectors = merge_result.sectors;
+    select_single_sector(
+        editor_world,
+        editor_world.sectors.empty() ? -1 : static_cast<int>(editor_world.sectors.size()) - 1
+    );
+    rebuild_runtime_geometry(editor_world);
+    std::cout << "Merged sectors; sectors: " << editor_world.sectors.size() << '\n';
+    return true;
+}
+
+bool adjust_selected_sector_heights(EditorWorld& editor_world, const float delta) {
+    if (editor_world.selected_sectors.empty()) {
+        std::cout << "Select at least one sector before adjusting height.\n";
+        return false;
+    }
+
+    int changed_count = 0;
+    for (const int sector_index : editor_world.selected_sectors) {
+        if (sector_index < 0 || sector_index >= static_cast<int>(editor_world.sectors.size())) {
+            continue;
+        }
+
+        undecedent::SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(sector_index)];
+        const float old_height = sector.height;
+        sector.height = std::max(kSectorMinHeight, sector.height + delta);
+        if (sector.height != old_height) {
+            ++changed_count;
+        }
+    }
+
+    if (changed_count == 0) {
+        std::cout << "Selected sector height is already at the limit.\n";
+        return false;
+    }
+
+    rebuild_runtime_geometry(editor_world);
+    std::cout << "Adjusted sector height by " << delta << " for " << changed_count << " sectors.\n";
+    return true;
+}
+
+bool adjust_selected_sector_floor_heights(EditorWorld& editor_world, const float delta) {
+    if (editor_world.selected_sectors.empty()) {
+        std::cout << "Select at least one sector before adjusting floor height.\n";
+        return false;
+    }
+
+    int changed_count = 0;
+    for (const int sector_index : editor_world.selected_sectors) {
+        if (sector_index < 0 || sector_index >= static_cast<int>(editor_world.sectors.size())) {
+            continue;
+        }
+
+        undecedent::SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(sector_index)];
+        sector.floor_height += delta;
+        ++changed_count;
+    }
+
+    if (changed_count == 0) {
+        std::cout << "No valid selected sectors to adjust.\n";
+        return false;
+    }
+
+    rebuild_runtime_geometry(editor_world);
+    std::cout << "Adjusted sector floor by " << delta << " for " << changed_count << " sectors.\n";
+    return true;
+}
+
+void process_pending_map_dialogs(
+    EditorWorld& editor_world,
+    GameCamera& game_camera,
+    const bool editor_enabled,
+    MapDialogRequests& requests
+) {
+    std::string save_path_string;
+    std::string load_path_string;
+    std::vector<std::string> messages;
+    {
+        std::lock_guard<std::mutex> lock(requests.mutex);
+        save_path_string = std::move(requests.pending_save_path);
+        load_path_string = std::move(requests.pending_load_path);
+        messages = std::move(requests.messages);
+        requests.pending_save_path.clear();
+        requests.pending_load_path.clear();
+        requests.messages.clear();
+    }
+
+    for (const std::string& message : messages) {
+        std::cout << message << '\n';
+    }
+
+    if (!save_path_string.empty()) {
+        const std::filesystem::path save_path = normalize_save_map_path(save_path_string);
+        const undecedent::SaveMapResult result = undecedent::save_map_file(editor_world.sectors, save_path);
+        std::cout << result.message << '\n';
+    }
+
+    if (!load_path_string.empty()) {
+        const undecedent::LoadMapResult result = undecedent::load_map_file(load_path_string);
+        if (!result.ok) {
+            std::cout << "Cannot load map: " << result.message << '\n';
+            return;
+        }
+
+        finish_committed_vertex_drag(editor_world);
+        cancel_plane_tool(editor_world);
+        editor_world.sectors = result.sectors;
+        clear_sector_selection(editor_world);
+        rebuild_runtime_geometry(editor_world);
+        if (!editor_enabled) {
+            frame_game_camera_on_sectors(game_camera, editor_world.sectors);
+        }
+        std::cout << result.message << " Sectors: " << editor_world.sectors.size() << '\n';
+    }
 }
 
 std::uint64_t scale_indicator_world_units(const float zoom) {
@@ -551,7 +1240,125 @@ void draw_stroke_u(
     draw_stroke_segment(4, x, y, size, width, height);
 }
 
-void draw_scale_label(
+void draw_stroke_letter(
+    const char letter,
+    const float x,
+    const float y,
+    const float size,
+    const int width,
+    const int height
+) {
+    switch (letter) {
+        case 'A':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(1, x, y, size, width, height);
+            draw_stroke_segment(2, x, y, size, width, height);
+            draw_stroke_segment(4, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            draw_stroke_segment(6, x, y, size, width, height);
+            break;
+        case 'C':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(3, x, y, size, width, height);
+            draw_stroke_segment(4, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            break;
+        case 'D':
+            draw_stroke_segment(1, x, y, size, width, height);
+            draw_stroke_segment(2, x, y, size, width, height);
+            draw_stroke_segment(3, x, y, size, width, height);
+            draw_stroke_segment(4, x, y, size, width, height);
+            draw_stroke_segment(6, x, y, size, width, height);
+            break;
+        case 'E':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(3, x, y, size, width, height);
+            draw_stroke_segment(4, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            draw_stroke_segment(6, x, y, size, width, height);
+            break;
+        case 'F':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            draw_stroke_segment(6, x, y, size, width, height);
+            draw_stroke_segment(4, x, y, size, width, height);
+            break;
+        case 'I':
+            draw_stroke_segment(1, x, y, size, width, height);
+            draw_stroke_segment(2, x, y, size, width, height);
+            break;
+        case 'L':
+            draw_stroke_segment(3, x, y, size, width, height);
+            draw_stroke_segment(4, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            break;
+        case 'M':
+            draw_screen_line(x, y + size * 1.65F, x, y, width, height);
+            draw_screen_line(x, y, x + size * 0.5F, y + size * 0.68F, width, height);
+            draw_screen_line(x + size * 0.5F, y + size * 0.68F, x + size, y, width, height);
+            draw_screen_line(x + size, y, x + size, y + size * 1.65F, width, height);
+            break;
+        case 'N':
+            draw_screen_line(x, y + size * 1.65F, x, y, width, height);
+            draw_screen_line(x, y, x + size, y + size * 1.65F, width, height);
+            draw_screen_line(x + size, y, x + size, y + size * 1.65F, width, height);
+            break;
+        case 'O':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(1, x, y, size, width, height);
+            draw_stroke_segment(2, x, y, size, width, height);
+            draw_stroke_segment(3, x, y, size, width, height);
+            draw_stroke_segment(4, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            break;
+        case 'P':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(1, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            draw_stroke_segment(6, x, y, size, width, height);
+            break;
+        case 'R':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(1, x, y, size, width, height);
+            draw_stroke_segment(2, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            draw_stroke_segment(6, x, y, size, width, height);
+            break;
+        case 'S':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_stroke_segment(5, x, y, size, width, height);
+            draw_stroke_segment(6, x, y, size, width, height);
+            draw_stroke_segment(2, x, y, size, width, height);
+            draw_stroke_segment(3, x, y, size, width, height);
+            break;
+        case 'T':
+            draw_stroke_segment(0, x, y, size, width, height);
+            draw_screen_line(x + size * 0.5F, y, x + size * 0.5F, y + size * 1.65F, width, height);
+            break;
+        case 'U':
+            draw_stroke_u(x, y, size, width, height);
+            break;
+        case 'V':
+            draw_screen_line(x, y, x + size * 0.5F, y + size * 1.65F, width, height);
+            draw_screen_line(x + size * 0.5F, y + size * 1.65F, x + size, y, width, height);
+            break;
+        case 'W':
+            draw_screen_line(x, y, x + size * 0.25F, y + size * 1.65F, width, height);
+            draw_screen_line(x + size * 0.25F, y + size * 1.65F, x + size * 0.5F, y + size * 0.9F, width, height);
+            draw_screen_line(x + size * 0.5F, y + size * 0.9F, x + size * 0.75F, y + size * 1.65F, width, height);
+            draw_screen_line(x + size * 0.75F, y + size * 1.65F, x + size, y, width, height);
+            break;
+        case 'Y':
+            draw_screen_line(x, y, x + size * 0.5F, y + size * 0.82F, width, height);
+            draw_screen_line(x + size, y, x + size * 0.5F, y + size * 0.82F, width, height);
+            draw_screen_line(x + size * 0.5F, y + size * 0.82F, x + size * 0.5F, y + size * 1.65F, width, height);
+            break;
+        default:
+            break;
+    }
+}
+
+void draw_stroke_text(
     const std::string& label,
     const float x,
     const float y,
@@ -563,11 +1370,111 @@ void draw_scale_label(
     for (const char ch : label) {
         if (ch >= '0' && ch <= '9') {
             draw_stroke_digit(ch, cursor_x, y, size, width, height);
+            cursor_x += size * 1.45F;
+        } else if (ch >= 'A' && ch <= 'Z') {
+            draw_stroke_letter(ch, cursor_x, y, size, width, height);
+            cursor_x += size * 1.45F;
         } else if (ch == 'u') {
             draw_stroke_u(cursor_x, y, size, width, height);
+            cursor_x += size * 1.45F;
+        } else if (ch == '.') {
+            draw_screen_line(
+                cursor_x + size * 0.35F,
+                y + size * 1.55F,
+                cursor_x + size * 0.38F,
+                y + size * 1.55F,
+                width,
+                height
+            );
+            cursor_x += size * 0.75F;
+        } else if (ch == '/') {
+            draw_screen_line(cursor_x, y + size * 1.65F, cursor_x + size, y, width, height);
+            cursor_x += size * 1.05F;
+        } else {
+            cursor_x += size * 0.85F;
         }
-        cursor_x += size * 1.45F;
     }
+}
+
+void draw_scale_label(
+    const std::string& label,
+    const float x,
+    const float y,
+    const float size,
+    const int width,
+    const int height
+) {
+    draw_stroke_text(label, x, y, size, width, height);
+}
+
+void draw_fps_counter(const int fps, const int width, const int height) {
+    const std::string label = "FPS " + std::to_string(std::max(0, fps));
+    const float size = 8.0F;
+    const float x = 16.0F;
+    const float y = 16.0F;
+    const float box_width = 18.0F + static_cast<float>(label.size()) * size * 1.45F;
+    const float box_height = 30.0F;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glBegin(GL_QUADS);
+    glColor4f(0.0F, 0.0F, 0.0F, 0.38F);
+    draw_screen_quad(10.0F, 10.0F, box_width, box_height, width, height);
+    glEnd();
+
+    glLineWidth(1.5F);
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    draw_stroke_text(label, x, y, size, width, height);
+    glEnd();
+
+    glLineWidth(1.0F);
+    glDisable(GL_BLEND);
+}
+
+void draw_profiler_overlay(
+    const ProfilerDisplay& profiler,
+    const int width,
+    const int height,
+    const float top_y
+) {
+    const float size = 6.0F;
+    const float x = 16.0F;
+    const float line_height = 16.0F;
+    const std::vector<std::string> lines{
+        "FPS " + std::to_string(std::max(0, profiler.fps)),
+        "FRAME " + format_ms(profiler.frame_ms) + "MS",
+        "EVENTS " + format_ms(profiler.events_ms) + "MS",
+        "UPDATE " + format_ms(profiler.update_ms) + "MS",
+        "RENDER " + format_ms(profiler.render_ms) + "MS",
+        "OVERLAY " + format_ms(profiler.overlay_ms) + "MS",
+        "FINISH " + format_ms(profiler.finish_ms) + "MS",
+        "SWAP " + format_ms(profiler.swap_ms) + "MS",
+        "TRIS " + std::to_string(profiler.total_triangles) + "/" + std::to_string(profiler.visible_triangles),
+        "SECT " + std::to_string(profiler.sectors) + " WALL " + std::to_string(profiler.walls),
+    };
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glBegin(GL_QUADS);
+    glColor4f(0.0F, 0.0F, 0.0F, 0.42F);
+    draw_screen_quad(10.0F, top_y - 6.0F, 236.0F, 12.0F + line_height * static_cast<float>(lines.size()), width, height);
+    glEnd();
+
+    glLineWidth(1.35F);
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        draw_stroke_text(lines[i], x, top_y + static_cast<float>(i) * line_height, size, width, height);
+    }
+    glEnd();
+
+    glLineWidth(1.0F);
+    glDisable(GL_BLEND);
 }
 
 void apply_editor_scroll_zoom(
@@ -612,6 +1519,112 @@ void update_editor_camera(EditorCamera& camera, const float dt) {
     const float current_zoom_log = std::log(camera.zoom);
     const float target_zoom_log = std::log(camera.target_zoom);
     camera.zoom = std::exp(current_zoom_log + ((target_zoom_log - current_zoom_log) * t));
+}
+
+void update_game_camera(GameCamera& camera, const float dt) {
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+
+    if (keys[SDL_SCANCODE_LEFT]) {
+        camera.yaw += kGameLookSpeed * dt;
+    }
+    if (keys[SDL_SCANCODE_RIGHT]) {
+        camera.yaw -= kGameLookSpeed * dt;
+    }
+    if (keys[SDL_SCANCODE_UP]) {
+        camera.pitch = std::min(camera.pitch + kGameLookSpeed * dt, 1.45F);
+    }
+    if (keys[SDL_SCANCODE_DOWN]) {
+        camera.pitch = std::max(camera.pitch - kGameLookSpeed * dt, -1.45F);
+    }
+
+    const float forward_flat = std::cos(camera.pitch);
+    const float forward_x = -std::sin(camera.yaw) * forward_flat;
+    const float forward_y = std::sin(camera.pitch);
+    const float forward_z = -std::cos(camera.yaw) * forward_flat;
+    const float strafe_x = std::cos(camera.yaw);
+    const float strafe_z = -std::sin(camera.yaw);
+    const float step = kGameMoveSpeed * dt;
+
+    if (keys[SDL_SCANCODE_W]) {
+        camera.x += forward_x * step;
+        camera.y += forward_y * step;
+        camera.z += forward_z * step;
+    }
+    if (keys[SDL_SCANCODE_S]) {
+        camera.x -= forward_x * step;
+        camera.y -= forward_y * step;
+        camera.z -= forward_z * step;
+    }
+    if (keys[SDL_SCANCODE_A]) {
+        camera.x -= strafe_x * step;
+        camera.z -= strafe_z * step;
+    }
+    if (keys[SDL_SCANCODE_D]) {
+        camera.x += strafe_x * step;
+        camera.z += strafe_z * step;
+    }
+    if (keys[SDL_SCANCODE_SPACE]) {
+        camera.y += step;
+    }
+    if (keys[SDL_SCANCODE_C]) {
+        camera.y -= step;
+    }
+}
+
+void frame_game_camera_on_sectors(GameCamera& camera, const std::vector<undecedent::SectorPlane>& sectors) {
+    if (sectors.empty()) {
+        return;
+    }
+
+    bool initialized = false;
+    float min_x = 0.0F;
+    float max_x = 0.0F;
+    float min_z = 0.0F;
+    float max_z = 0.0F;
+    float max_height = 96.0F;
+    float max_ceiling = 96.0F;
+
+    const auto include_point = [&](const undecedent::Vec2 point) {
+        if (!initialized) {
+            min_x = max_x = point.x;
+            min_z = max_z = point.y;
+            initialized = true;
+            return;
+        }
+
+        min_x = std::min(min_x, point.x);
+        max_x = std::max(max_x, point.x);
+        min_z = std::min(min_z, point.y);
+        max_z = std::max(max_z, point.y);
+    };
+
+    for (const undecedent::SectorPlane& sector : sectors) {
+        max_height = std::max(max_height, sector.height);
+        max_ceiling = std::max(max_ceiling, sector.floor_height + sector.height);
+        for (const undecedent::Vec2 vertex : sector.outer.vertices) {
+            include_point(vertex);
+        }
+        for (const undecedent::PolygonLoop& hole : sector.holes) {
+            for (const undecedent::Vec2 vertex : hole.vertices) {
+                include_point(vertex);
+            }
+        }
+    }
+
+    if (!initialized) {
+        return;
+    }
+
+    const float center_x = (min_x + max_x) * 0.5F;
+    const float center_z = (min_z + max_z) * 0.5F;
+    const float extent = std::max(max_x - min_x, max_z - min_z);
+    const float distance = std::max(160.0F, extent * 1.6F);
+
+    camera.x = center_x;
+    camera.y = std::max(48.0F, std::max(max_height * 0.65F, max_ceiling * 0.65F));
+    camera.z = center_z + distance;
+    camera.yaw = 0.0F;
+    camera.pitch = 0.0F;
 }
 
 void draw_editor_grid(const int width, const int height, const EditorCamera& camera) {
@@ -716,7 +1729,7 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
 
     glBegin(GL_TRIANGLES);
     for (std::size_t i = 0; i < editor_world.sectors.size(); ++i) {
-        const bool selected = static_cast<int>(i) == editor_world.selected_sector;
+        const bool selected = is_sector_selected(editor_world, static_cast<int>(i));
         if (selected) {
             glColor4f(0.36F, 0.78F, 0.68F, 0.28F);
         } else {
@@ -733,7 +1746,7 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
 
     glLineWidth(2.0F);
     for (std::size_t i = 0; i < editor_world.sectors.size(); ++i) {
-        const bool selected = static_cast<int>(i) == editor_world.selected_sector;
+        const bool selected = is_sector_selected(editor_world, static_cast<int>(i));
         const float alpha = selected ? 0.95F : 0.72F;
         draw_loop_outline(editor_world.sectors[i].outer, width, height, camera, 0.72F, 0.95F, 0.86F, alpha);
         for (const undecedent::PolygonLoop& hole : editor_world.sectors[i].holes) {
@@ -758,9 +1771,18 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
     glEnd();
 
     glBegin(GL_QUADS);
-    for (const undecedent::SectorPlane& sector : editor_world.sectors) {
-        for (const undecedent::Vec2 vertex : sector.outer.vertices) {
-            draw_vertex_marker(vertex, width, height, camera, 0.90F, 0.96F, 0.76F, 0.85F);
+    for (std::size_t sector_index = 0; sector_index < editor_world.sectors.size(); ++sector_index) {
+        const undecedent::SectorPlane& sector = editor_world.sectors[sector_index];
+        for (std::size_t vertex_index = 0; vertex_index < sector.outer.vertices.size(); ++vertex_index) {
+            const undecedent::Vec2 vertex = sector.outer.vertices[vertex_index];
+            if (is_dragged_committed_ref(editor_world, sector_index, vertex_index)) {
+                draw_vertex_marker(vertex, width, height, camera, 1.0F, 0.28F, 0.22F, 0.98F);
+            } else if (editor_world.has_hovered_committed_vertex &&
+                same_editor_point(editor_world.hovered_committed_vertex, vertex)) {
+                draw_vertex_marker(vertex, width, height, camera, 0.36F, 0.78F, 1.0F, 0.98F);
+            } else {
+                draw_vertex_marker(vertex, width, height, camera, 0.90F, 0.96F, 0.76F, 0.85F);
+            }
         }
         for (const undecedent::PolygonLoop& hole : sector.holes) {
             for (const undecedent::Vec2 vertex : hole.vertices) {
@@ -869,8 +1891,117 @@ void draw_scale_indicator(const int width, const int height, const EditorCamera&
     glDisable(GL_BLEND);
 }
 
+void set_game_projection(const int width, const int height, const GameCamera& camera) {
+    const double aspect = height > 0 ? static_cast<double>(width) / static_cast<double>(height) : 1.0;
+    const double fov_y_radians = 70.0 * 3.14159265358979323846 / 180.0;
+    const double top = std::tan(fov_y_radians * 0.5) * kGameNearPlane;
+    const double right = top * aspect;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glFrustum(-right, right, -top, top, kGameNearPlane, kGameFarPlane);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glRotatef(-camera.pitch * 180.0F / 3.14159265F, 1.0F, 0.0F, 0.0F);
+    glRotatef(-camera.yaw * 180.0F / 3.14159265F, 0.0F, 1.0F, 0.0F);
+    glTranslatef(-camera.x, -camera.y, -camera.z);
+}
+
+int draw_runtime_world(
+    const undecedent::RuntimeWorld& world,
+    const RuntimeRenderCache& render_cache,
+    const int width,
+    const int height,
+    const GameCamera& camera,
+    const bool draw_wire_overlay
+) {
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+
+    set_game_projection(width, height, camera);
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glLineWidth(1.0F);
+
+    const int camera_sector = undecedent::sector_at_point(world, undecedent::Vec3{camera.x, camera.y, camera.z});
+    const std::vector<int> visible_sectors = undecedent::visible_sectors_from(world, camera_sector);
+    const bool filter_visible_sectors = camera_sector >= 0;
+    const auto is_visible = [&visible_sectors, filter_visible_sectors](const int sector_id) {
+        return !filter_visible_sectors ||
+            std::find(visible_sectors.begin(), visible_sectors.end(), sector_id) != visible_sectors.end();
+    };
+
+    int visible_triangle_count = 0;
+
+    if (render_cache.vertex_buffer != 0 && render_cache.total_vertices > 0) {
+        glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(
+            3,
+            GL_FLOAT,
+            sizeof(RuntimeRenderVertex),
+            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, x))
+        );
+        glColorPointer(
+            3,
+            GL_FLOAT,
+            sizeof(RuntimeRenderVertex),
+            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, r))
+        );
+
+        if (!filter_visible_sectors) {
+            glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
+            visible_triangle_count = render_cache.total_vertices / 3;
+        } else {
+            for (const int sector_id : visible_sectors) {
+                if (sector_id < 0 || sector_id >= static_cast<int>(render_cache.sector_ranges.size())) {
+                    continue;
+                }
+                const RuntimeRenderRange range = render_cache.sector_ranges[static_cast<std::size_t>(sector_id)];
+                if (range.vertex_count <= 0) {
+                    continue;
+                }
+                glDrawArrays(GL_TRIANGLES, range.first_vertex, range.vertex_count);
+                visible_triangle_count += range.vertex_count / 3;
+            }
+        }
+
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    if (draw_wire_overlay) {
+        glBegin(GL_LINES);
+        glColor4f(0.84F, 0.96F, 0.78F, 0.58F);
+        for (const undecedent::RuntimeTaggedTriangle& tagged_triangle : world.triangles) {
+            if (!is_visible(tagged_triangle.sector_id)) {
+                continue;
+            }
+
+            const undecedent::RuntimeTriangle& triangle = tagged_triangle.triangle;
+            glVertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
+            glVertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
+            glVertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
+            glVertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
+            glVertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
+            glVertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
+        }
+        glEnd();
+    }
+
+    return visible_triangle_count;
+}
+
 void set_editor_enabled(SDL_Window* window, const bool enabled) {
     SDL_SetWindowTitle(window, enabled ? "Undecedent - Editor" : "Undecedent");
+    SDL_SetEventEnabled(SDL_EVENT_MOUSE_MOTION, enabled);
+    if (!enabled) {
+        SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION);
+    }
     std::cout << "Editor " << (enabled ? "enabled" : "disabled") << '\n';
 }
 } // namespace
@@ -917,20 +2048,52 @@ int main() {
     }
 
     SDL_GL_SetSwapInterval(0);
+    SDL_SetEventEnabled(SDL_EVENT_MOUSE_MOTION, false);
 
     bool running = true;
     bool editor_enabled = false;
+    bool fps_counter_enabled = false;
+    bool profiler_enabled = false;
+    bool profiler_finish_diagnostic_enabled = false;
+    bool runtime_wire_overlay_enabled = false;
+    BenchmarkState benchmark{};
+    float fps_counter_seconds = 0.0F;
+    int fps_counter_frames = 0;
+    int displayed_fps = 0;
+    ProfilerAccumulator profiler_accumulator{};
+    BenchmarkAccumulator benchmark_accumulator{};
+    ProfilerDisplay displayed_profiler{};
+    FullscreenState fullscreen_state{};
+    MapDialogRequests map_dialog_requests{};
     EditorCamera editor_camera{};
+    GameCamera game_camera{};
     EditorWorld editor_world{};
     Uint64 previous_ticks = SDL_GetTicksNS();
     while (running) {
         const Uint64 current_ticks = SDL_GetTicksNS();
+        const Uint64 frame_start_ticks = current_ticks;
         const float dt = std::min(
             static_cast<float>(current_ticks - previous_ticks) / 1'000'000'000.0F,
             0.1F
         );
         previous_ticks = current_ticks;
+        fps_counter_seconds += dt;
+        ++fps_counter_frames;
+        if (fps_counter_seconds >= kFpsCounterUpdateSeconds) {
+            displayed_fps = static_cast<int>(std::round(static_cast<float>(fps_counter_frames) / fps_counter_seconds));
+            fps_counter_seconds = 0.0F;
+            fps_counter_frames = 0;
+        }
 
+        double events_ms = 0.0;
+        double update_ms = 0.0;
+        double render_ms = 0.0;
+        double overlay_ms = 0.0;
+        double finish_ms = 0.0;
+        double swap_ms = 0.0;
+        int visible_triangle_count = 0;
+
+        const Uint64 events_start_ticks = SDL_GetTicksNS();
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
@@ -939,6 +2102,19 @@ int main() {
 
             if (event.type == SDL_EVENT_KEY_DOWN) {
                 const SDL_Keycode key = event.key.key;
+                const SDL_Scancode scancode = event.key.scancode;
+                const bool ctrl_down = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
+                const bool shift_down = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+
+                if (ctrl_down && (key == SDLK_S || scancode == SDL_SCANCODE_S) && !event.key.repeat) {
+                    show_save_map_dialog(window, map_dialog_requests);
+                    continue;
+                }
+
+                if (ctrl_down && (key == SDLK_O || scancode == SDL_SCANCODE_O) && !event.key.repeat) {
+                    show_load_map_dialog(window, map_dialog_requests);
+                    continue;
+                }
 
                 if (editor_enabled && key == SDLK_P && !event.key.repeat) {
                     start_outer_plane(editor_world);
@@ -947,6 +2123,32 @@ int main() {
 
                 if (editor_enabled && key == SDLK_H && !event.key.repeat) {
                     start_hole_plane(editor_world);
+                    continue;
+                }
+
+                if (editor_enabled && key == SDLK_M && !event.key.repeat &&
+                    editor_world.plane_tool == PlaneToolMode::None) {
+                    merge_selected_sectors(editor_world);
+                    continue;
+                }
+
+                if (editor_enabled && editor_world.plane_tool == PlaneToolMode::None &&
+                    (key == SDLK_KP_PLUS || scancode == SDL_SCANCODE_KP_PLUS) && !event.key.repeat) {
+                    if (shift_down) {
+                        adjust_selected_sector_floor_heights(editor_world, kSectorHeightStep);
+                    } else {
+                        adjust_selected_sector_heights(editor_world, kSectorHeightStep);
+                    }
+                    continue;
+                }
+
+                if (editor_enabled && editor_world.plane_tool == PlaneToolMode::None &&
+                    (key == SDLK_KP_MINUS || scancode == SDL_SCANCODE_KP_MINUS) && !event.key.repeat) {
+                    if (shift_down) {
+                        adjust_selected_sector_floor_heights(editor_world, -kSectorHeightStep);
+                    } else {
+                        adjust_selected_sector_heights(editor_world, -kSectorHeightStep);
+                    }
                     continue;
                 }
 
@@ -976,9 +2178,63 @@ int main() {
                     editor_enabled = !editor_enabled;
                     editor_camera.panning = false;
                     if (!editor_enabled) {
+                        finish_committed_vertex_drag(editor_world);
                         cancel_plane_tool(editor_world);
+                        frame_game_camera_on_sectors(game_camera, editor_world.sectors);
                     }
                     set_editor_enabled(window, editor_enabled);
+                }
+
+                if (key == SDLK_F3 && !event.key.repeat) {
+                    fps_counter_enabled = !fps_counter_enabled;
+                    std::cout << "FPS counter " << (fps_counter_enabled ? "enabled" : "disabled") << '\n';
+                }
+
+                if (key == SDLK_F4 && !event.key.repeat) {
+                    profiler_enabled = !profiler_enabled;
+                    std::cout << "Profiler " << (profiler_enabled ? "enabled" : "disabled") << '\n';
+                }
+
+                if ((key == SDLK_F7 || scancode == SDL_SCANCODE_F7) && !event.key.repeat) {
+                    profiler_finish_diagnostic_enabled = !profiler_finish_diagnostic_enabled;
+                    std::cout << "Profiler GL finish diagnostic "
+                              << (profiler_finish_diagnostic_enabled ? "enabled" : "disabled") << '\n';
+                }
+
+                if ((key == SDLK_F8 || scancode == SDL_SCANCODE_F8) && !event.key.repeat) {
+                    benchmark.enabled = !benchmark.enabled;
+                    benchmark_accumulator = {};
+                    if (benchmark.enabled) {
+                        profiler_finish_diagnostic_enabled = false;
+                    }
+                    std::cout << "Benchmark mode " << (benchmark.enabled ? "enabled" : "disabled")
+                              << " (F9 clear " << (benchmark.skip_clear ? "skip" : "on")
+                              << ", F10 swap " << (benchmark.skip_swap ? "skip" : "on") << ")\n"
+                              << std::flush;
+                }
+
+                if ((key == SDLK_F9 || scancode == SDL_SCANCODE_F9) && !event.key.repeat) {
+                    benchmark.skip_clear = !benchmark.skip_clear;
+                    benchmark_accumulator = {};
+                    std::cout << "Benchmark clear " << (benchmark.skip_clear ? "skipped" : "enabled") << '\n'
+                              << std::flush;
+                }
+
+                if ((key == SDLK_F10 || scancode == SDL_SCANCODE_F10) && !event.key.repeat) {
+                    benchmark.skip_swap = !benchmark.skip_swap;
+                    benchmark_accumulator = {};
+                    std::cout << "Benchmark swap " << (benchmark.skip_swap ? "skipped" : "enabled") << '\n'
+                              << std::flush;
+                }
+
+                if (key == SDLK_F6 && !event.key.repeat) {
+                    runtime_wire_overlay_enabled = !runtime_wire_overlay_enabled;
+                    std::cout << "Runtime wire overlay "
+                              << (runtime_wire_overlay_enabled ? "enabled" : "disabled") << '\n';
+                }
+
+                if ((key == SDLK_F11 || event.key.scancode == SDL_SCANCODE_F11) && !event.key.repeat) {
+                    toggle_exclusive_fullscreen(window, fullscreen_state);
                 }
             }
 
@@ -1026,13 +2282,39 @@ int main() {
                             refresh_draft(editor_world);
                         }
                     } else {
+                        undecedent::Vec2 hit_vertex{};
+                        if (committed_vertex_at_screen(
+                                editor_world,
+                                editor_camera,
+                                width,
+                                height,
+                                event.button.x,
+                                event.button.y,
+                                hit_vertex
+                            )) {
+                            editor_world.committed_drag_snapshot = editor_world.sectors;
+                            editor_world.dragged_committed_refs = matching_committed_vertices(editor_world, hit_vertex);
+                            editor_world.dragged_committed_vertex = hit_vertex;
+                            editor_world.has_dragged_committed_vertex = !editor_world.dragged_committed_refs.empty();
+                            editor_world.dragged_committed_vertex_moved = false;
+                            editor_world.has_hovered_committed_vertex = false;
+                            continue;
+                        }
+
                         const undecedent::Vec2 world{
                             screen_to_world_x(event.button.x, width, editor_camera),
                             screen_to_world_y(event.button.y, height, editor_camera),
                         };
-                        editor_world.selected_sector = sector_at_point(editor_world, world);
+                        const int clicked_sector = sector_at_point(editor_world, world);
+                        const bool shift_select = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+                        if (shift_select) {
+                            toggle_sector_selection(editor_world, clicked_sector);
+                        } else {
+                            select_single_sector(editor_world, clicked_sector);
+                        }
+
                         if (editor_world.selected_sector >= 0) {
-                            std::cout << "Selected sector " << editor_world.selected_sector << '\n';
+                            std::cout << "Selected sectors: " << editor_world.selected_sectors.size() << '\n';
                         }
                     }
                 }
@@ -1041,6 +2323,10 @@ int main() {
             if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 if (event.button.button == SDL_BUTTON_MIDDLE || event.button.button == SDL_BUTTON_RIGHT) {
                     editor_camera.panning = false;
+                }
+
+                if (event.button.button == SDL_BUTTON_LEFT && editor_world.has_dragged_committed_vertex) {
+                    finish_committed_vertex_drag(editor_world);
                 }
 
                 if (event.button.button == SDL_BUTTON_LEFT && editor_world.dragged_draft_vertex >= 0) {
@@ -1090,6 +2376,21 @@ int main() {
                         refresh_draft(editor_world);
                     }
                 }
+
+                if (editor_world.has_dragged_committed_vertex &&
+                    !same_editor_point(editor_world.dragged_committed_vertex, editor_world.snapped_mouse)) {
+                    move_dragged_committed_vertices(editor_world, editor_world.snapped_mouse);
+                    editor_world.dragged_committed_vertex_moved = true;
+                }
+
+                update_committed_vertex_hover(
+                    editor_world,
+                    editor_camera,
+                    width,
+                    height,
+                    event.motion.x,
+                    event.motion.y
+                );
             }
 
             if (event.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -1112,9 +2413,14 @@ int main() {
                 );
             }
         }
+        events_ms = ticks_to_ms(events_start_ticks, SDL_GetTicksNS());
+        process_pending_map_dialogs(editor_world, game_camera, editor_enabled, map_dialog_requests);
 
+        const Uint64 update_start_ticks = SDL_GetTicksNS();
         if (editor_enabled) {
             update_editor_camera(editor_camera, dt);
+        } else {
+            update_game_camera(game_camera, dt);
         }
 
         int width = 0;
@@ -1125,25 +2431,134 @@ int main() {
             float mouse_y = 0.0F;
             SDL_GetMouseState(&mouse_x, &mouse_y);
             update_snapped_mouse(editor_world, editor_camera, width, height, mouse_x, mouse_y);
+            update_committed_vertex_hover(editor_world, editor_camera, width, height, mouse_x, mouse_y);
         }
+        update_ms = ticks_to_ms(update_start_ticks, SDL_GetTicksNS());
+
+        const Uint64 render_start_ticks = SDL_GetTicksNS();
         glViewport(0, 0, width, height);
         if (editor_enabled) {
             glClearColor(0.025F, 0.035F, 0.04F, 1.0F);
         } else {
             glClearColor(0.02F, 0.025F, 0.03F, 1.0F);
         }
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (!benchmark.enabled || !benchmark.skip_clear) {
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
 
         if (editor_enabled) {
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
             draw_editor_grid(width, height, editor_camera);
             draw_sector_planes(editor_world, width, height, editor_camera);
             draw_draft_plane(editor_world, width, height, editor_camera);
             draw_scale_indicator(width, height, editor_camera);
+        } else {
+            visible_triangle_count = draw_runtime_world(
+                editor_world.runtime_world,
+                editor_world.runtime_render_cache,
+                width,
+                height,
+                game_camera,
+                runtime_wire_overlay_enabled
+            );
+        }
+        render_ms = ticks_to_ms(render_start_ticks, SDL_GetTicksNS());
+
+        const Uint64 overlay_start_ticks = SDL_GetTicksNS();
+        if (!benchmark.enabled && fps_counter_enabled) {
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
+            draw_fps_counter(displayed_fps, width, height);
         }
 
-        SDL_GL_SwapWindow(window);
+        if (!benchmark.enabled && profiler_enabled) {
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
+            ProfilerDisplay profiler_to_draw = displayed_profiler;
+            profiler_to_draw.fps = displayed_fps;
+            profiler_to_draw.total_triangles = static_cast<int>(editor_world.runtime_world.triangles.size());
+            profiler_to_draw.visible_triangles = editor_enabled
+                ? 0
+                : visible_triangle_count;
+            profiler_to_draw.sectors = static_cast<int>(editor_world.runtime_world.sectors.size());
+            profiler_to_draw.walls = static_cast<int>(editor_world.runtime_world.walls.size());
+            draw_profiler_overlay(profiler_to_draw, width, height, fps_counter_enabled ? 50.0F : 16.0F);
+        }
+        overlay_ms = ticks_to_ms(overlay_start_ticks, SDL_GetTicksNS());
+
+        if (profiler_finish_diagnostic_enabled) {
+            const Uint64 finish_start_ticks = SDL_GetTicksNS();
+            glFinish();
+            finish_ms = ticks_to_ms(finish_start_ticks, SDL_GetTicksNS());
+        }
+
+        const Uint64 swap_start_ticks = SDL_GetTicksNS();
+        if (!benchmark.enabled || !benchmark.skip_swap) {
+            SDL_GL_SwapWindow(window);
+        }
+        swap_ms = ticks_to_ms(swap_start_ticks, SDL_GetTicksNS());
+
+        const double frame_ms = ticks_to_ms(frame_start_ticks, SDL_GetTicksNS());
+        profiler_accumulator.frame_ms += frame_ms;
+        profiler_accumulator.events_ms += events_ms;
+        profiler_accumulator.update_ms += update_ms;
+        profiler_accumulator.render_ms += render_ms;
+        profiler_accumulator.overlay_ms += overlay_ms;
+        profiler_accumulator.finish_ms += finish_ms;
+        profiler_accumulator.swap_ms += swap_ms;
+        profiler_accumulator.seconds += frame_ms / 1000.0;
+        ++profiler_accumulator.frames;
+
+        if (benchmark.enabled) {
+            benchmark_accumulator.frame_ms += frame_ms;
+            benchmark_accumulator.events_ms += events_ms;
+            benchmark_accumulator.update_ms += update_ms;
+            benchmark_accumulator.render_ms += render_ms;
+            benchmark_accumulator.overlay_ms += overlay_ms;
+            benchmark_accumulator.finish_ms += finish_ms;
+            benchmark_accumulator.swap_ms += swap_ms;
+            benchmark_accumulator.seconds += frame_ms / 1000.0;
+            ++benchmark_accumulator.frames;
+            if (benchmark_accumulator.seconds >= 1.0) {
+                print_benchmark_report(
+                    benchmark,
+                    benchmark_accumulator,
+                    editor_enabled,
+                    static_cast<int>(editor_world.runtime_world.triangles.size()),
+                    editor_enabled ? 0 : visible_triangle_count,
+                    static_cast<int>(editor_world.runtime_world.sectors.size()),
+                    static_cast<int>(editor_world.runtime_world.walls.size())
+                );
+                benchmark_accumulator = {};
+            }
+        }
+
+        if (profiler_accumulator.seconds >= kFpsCounterUpdateSeconds && profiler_accumulator.frames > 0) {
+            const double inv_frames = 1.0 / static_cast<double>(profiler_accumulator.frames);
+            displayed_profiler.frame_ms = profiler_accumulator.frame_ms * inv_frames;
+            displayed_profiler.events_ms = profiler_accumulator.events_ms * inv_frames;
+            displayed_profiler.update_ms = profiler_accumulator.update_ms * inv_frames;
+            displayed_profiler.render_ms = profiler_accumulator.render_ms * inv_frames;
+            displayed_profiler.overlay_ms = profiler_accumulator.overlay_ms * inv_frames;
+            displayed_profiler.finish_ms = profiler_accumulator.finish_ms * inv_frames;
+            displayed_profiler.swap_ms = profiler_accumulator.swap_ms * inv_frames;
+            displayed_profiler.fps = static_cast<int>(std::round(static_cast<double>(profiler_accumulator.frames) / profiler_accumulator.seconds));
+            displayed_profiler.total_triangles = static_cast<int>(editor_world.runtime_world.triangles.size());
+            displayed_profiler.visible_triangles = editor_enabled ? 0 : visible_triangle_count;
+            displayed_profiler.sectors = static_cast<int>(editor_world.runtime_world.sectors.size());
+            displayed_profiler.walls = static_cast<int>(editor_world.runtime_world.walls.size());
+            profiler_accumulator = {};
+        }
     }
 
+    destroy_runtime_render_cache(editor_world.runtime_render_cache);
     SDL_GL_DestroyContext(gl_context);
     SDL_DestroyWindow(window);
     SDL_Quit();

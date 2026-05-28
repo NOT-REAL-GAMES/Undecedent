@@ -44,6 +44,8 @@ struct SectorPlane {
     std::vector<PolygonLoop> holes;
     std::vector<Triangle> triangles;
     std::vector<int> edge_neighbors;
+    float floor_height = 0.0F;
+    float height = 96.0F;
     TriangulationStatus status = TriangulationStatus::Ok;
     std::string status_message;
 };
