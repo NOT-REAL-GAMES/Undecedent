@@ -27,3 +27,11 @@ add_executable(Undecedent
 
 target_include_directories(Undecedent PRIVATE include glad/include)
 target_link_libraries(Undecedent PUBLIC OpenGL::GL SDL3::SDL3)
+
+if(WIN32)
+    add_custom_command(TARGET Undecedent POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:SDL3::SDL3>
+            $<TARGET_FILE_DIR:Undecedent>
+    )
+endif()

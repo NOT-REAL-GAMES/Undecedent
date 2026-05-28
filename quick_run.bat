@@ -5,7 +5,8 @@ set "CONFIG=%~1"
 if "%CONFIG%"=="" set "CONFIG=Debug"
 
 set "ROOT=%~dp0"
-set "BUILD_DIR=%ROOT%build"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+set "BUILD_DIR=%ROOT%\build"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 cmake -S "%ROOT%" -B "%BUILD_DIR%"
@@ -20,18 +21,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "EXE=%BUILD_DIR%\%CONFIG%\AETHERONUS.exe"
-if not exist "%EXE%" set "EXE=%BUILD_DIR%\x64\%CONFIG%\AETHERONUS.exe"
-if not exist "%EXE%" set "EXE=%BUILD_DIR%\bin\%CONFIG%\AETHERONUS.exe"
+set "EXE=%BUILD_DIR%\%CONFIG%\Undecedent.exe"
+if not exist "%EXE%" set "EXE=%BUILD_DIR%\x64\%CONFIG%\Undecedent.exe"
+if not exist "%EXE%" set "EXE=%BUILD_DIR%\bin\%CONFIG%\Undecedent.exe"
 
 if not exist "%EXE%" (
-    for /R "%BUILD_DIR%" %%F in (AETHERONUS.exe) do if not defined EXE_FOUND set "EXE_FOUND=%%F"
+    for /R "%BUILD_DIR%" %%F in (Undecedent.exe) do if not defined EXE_FOUND set "EXE_FOUND=%%F"
 )
 
 if defined EXE_FOUND set "EXE=%EXE_FOUND%"
 
 if not exist "%EXE%" (
-    echo Could not find AETHERONUS.exe in "%BUILD_DIR%".
+    echo Could not find Undecedent.exe in "%BUILD_DIR%".
     exit /b 1
 )
 
