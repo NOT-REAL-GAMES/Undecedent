@@ -1,0 +1,14 @@
+# Target labels
+ sdl3-populate
+# Source files and their labels
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/17c89629c4c8bbd0858b48a6294c9f75/sdl3-populate.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/8aaf37e7c1d5114f965f22852d79b21a/sdl3-populate-complete.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-build.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-configure.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-download.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-install.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-mkdir.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-patch.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-test.rule
+D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-update.rule

@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/17c89629c4c8bbd0858b48a6294c9f75/sdl3-populate.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/8aaf37e7c1d5114f965f22852d79b21a/sdl3-populate-complete.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-build.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-configure.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-download.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-install.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-mkdir.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-patch.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-test.rule"
+		},
+		{
+			"file" : "D:/Undecedent/build/_deps/sdl3-subbuild/CMakeFiles/dfe25bcd38591559b0671803617a6c71/sdl3-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"sdl3-populate"
+		],
+		"name" : "sdl3-populate"
+	}
+}

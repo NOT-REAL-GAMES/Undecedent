@@ -1,0 +1,7 @@
+D:/Undecedent/build/CMakeFiles/Undecedent.dir
+D:/Undecedent/build/CMakeFiles/ALL_BUILD.dir
+D:/Undecedent/build/CMakeFiles/ZERO_CHECK.dir
+D:/Undecedent/build/_deps/sdl3-build/CMakeFiles/SDL3-shared.dir
+D:/Undecedent/build/_deps/sdl3-build/CMakeFiles/SDL3_test.dir
+D:/Undecedent/build/_deps/sdl3-build/CMakeFiles/SDL_uclibc.dir
+D:/Undecedent/build/_deps/sdl3-build/CMakeFiles/ALL_BUILD.dir
