@@ -22,6 +22,8 @@ find_package(OpenGL REQUIRED)
 
 add_executable(Undecedent
     main.cpp
+    src/csg.cpp
+    src/triangulator.cpp
     glad/src/glad.c
 )
 
@@ -35,3 +37,18 @@ if(WIN32)
             $<TARGET_FILE_DIR:Undecedent>
     )
 endif()
+
+add_executable(UndecedentTriangulatorTests
+    tests/triangulator_tests.cpp
+    src/triangulator.cpp
+)
+
+target_include_directories(UndecedentTriangulatorTests PRIVATE include)
+
+add_executable(UndecedentCsgTests
+    tests/csg_tests.cpp
+    src/csg.cpp
+    src/triangulator.cpp
+)
+
+target_include_directories(UndecedentCsgTests PRIVATE include)
