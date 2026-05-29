@@ -1,0 +1,22 @@
+UNDECEDENT_MAP 1
+player_spawn -0 64 128 0
+point_lights 1
+point_light -0 64 0 1 0.860000014 0.620000005 384 1.5
+sectors 1
+sector
+height 96
+floor 0
+outer 8
+v 0 192
+v -128 128
+v -192 0
+v -128 -128
+v 0 -192
+v 128 -128
+v 192 0
+v 128 128
+holes 0
+materials 7 7
+wall_materials 8 0 1 0 1 0 1 0 1
+hole_wall_materials 0
+endsector

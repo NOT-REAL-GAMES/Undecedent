@@ -19,6 +19,8 @@ struct RuntimeBounds2 {
 struct RuntimeTaggedTriangle {
     RuntimeTriangle triangle;
     int sector_id = -1;
+    int material_id = kDefaultMaterialId;
+    RuntimeSurfaceRef surface;
 };
 
 struct RuntimeWallSegment {

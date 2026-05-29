@@ -7,6 +7,22 @@
 namespace undecedent {
 namespace {
 
+void normalize_materials(SectorPlane& sector) {
+    sector.floor_material = clamped_material_id(sector.floor_material);
+    sector.ceiling_material = clamped_material_id(sector.ceiling_material);
+    sector.wall_materials.resize(sector.outer.vertices.size(), kDefaultMaterialId);
+    for (int& material : sector.wall_materials) {
+        material = clamped_material_id(material);
+    }
+    sector.hole_wall_materials.resize(sector.holes.size());
+    for (std::size_t hole_index = 0; hole_index < sector.holes.size(); ++hole_index) {
+        sector.hole_wall_materials[hole_index].resize(sector.holes[hole_index].vertices.size(), kDefaultMaterialId);
+        for (int& material : sector.hole_wall_materials[hole_index]) {
+            material = clamped_material_id(material);
+        }
+    }
+}
+
 Vec3 floor_vertex(const Vec2 point, const float floor_height) {
     return Vec3{point.x, floor_height, point.y};
 }
@@ -136,24 +152,101 @@ bool point_in_sector_volume(const RuntimeSector& sector, const Vec3 point) {
     return point_in_sector(sector, Vec2{point.x, point.z});
 }
 
+bool vertical_ranges_overlap(const float floor_a, const float height_a, const float floor_b, const float height_b) {
+    const float lower = std::max(floor_a, floor_b);
+    const float upper = std::min(floor_a + height_a, floor_b + height_b);
+    return upper > lower + 0.001F;
+}
+
+void add_triangle(
+    RuntimeWorld& world,
+    const int sector_id,
+    const RuntimeTriangle triangle,
+    const int material_id,
+    const RuntimeSurfaceRef surface
+) {
+    world.triangles.push_back(RuntimeTaggedTriangle{
+        triangle,
+        sector_id,
+        clamped_material_id(material_id),
+        surface
+    });
+}
+
+void add_wall_record(RuntimeWorld& world, const int sector_id, const Vec2 a, const Vec2 b) {
+    const int wall_id = static_cast<int>(world.walls.size());
+    world.walls.push_back(RuntimeWallSegment{a, b, sector_id});
+    insert_wall_cells(world, wall_id, bounds_for_segment(a, b));
+}
+
 void add_wall(
     RuntimeWorld& world,
     const int sector_id,
     const Vec2 a,
     const Vec2 b,
     const float floor_height,
-    const float height
+    const float height,
+    const int material_id,
+    const RuntimeSurfaceRef surface
 ) {
-    const int wall_id = static_cast<int>(world.walls.size());
-    world.walls.push_back(RuntimeWallSegment{a, b, sector_id});
-    insert_wall_cells(world, wall_id, bounds_for_segment(a, b));
+    add_wall_record(world, sector_id, a, b);
 
     const Vec3 bottom_a = floor_vertex(a, floor_height);
     const Vec3 bottom_b = floor_vertex(b, floor_height);
     const Vec3 top_a = ceiling_vertex(a, floor_height, height);
     const Vec3 top_b = ceiling_vertex(b, floor_height, height);
-    world.triangles.push_back(RuntimeTaggedTriangle{RuntimeTriangle{bottom_a, top_a, top_b}, sector_id});
-    world.triangles.push_back(RuntimeTaggedTriangle{RuntimeTriangle{bottom_a, top_b, bottom_b}, sector_id});
+    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_a, top_b}, material_id, surface);
+    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_b, bottom_b}, material_id, surface);
+}
+
+void add_wall_span(
+    RuntimeWorld& world,
+    const int sector_id,
+    const Vec2 a,
+    const Vec2 b,
+    const float bottom,
+    const float top,
+    const int material_id,
+    const RuntimeSurfaceRef surface
+) {
+    if (top <= bottom + 0.001F) {
+        return;
+    }
+
+    add_wall_record(world, sector_id, a, b);
+
+    const Vec3 bottom_a = floor_vertex(a, bottom);
+    const Vec3 bottom_b = floor_vertex(b, bottom);
+    const Vec3 top_a = floor_vertex(a, top);
+    const Vec3 top_b = floor_vertex(b, top);
+    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_a, top_b}, material_id, surface);
+    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_b, bottom_b}, material_id, surface);
+}
+
+void add_neighbor_gap_walls(
+    RuntimeWorld& world,
+    const int sector_id,
+    const SectorPlane& sector,
+    const SectorPlane& neighbor,
+    const Vec2 a,
+    const Vec2 b,
+    const int material_id,
+    const RuntimeSurfaceRef surface
+) {
+    const float sector_floor = sector.floor_height;
+    const float sector_ceiling = sector.floor_height + sector.height;
+    const float neighbor_floor = neighbor.floor_height;
+    const float neighbor_ceiling = neighbor.floor_height + neighbor.height;
+    const float overlap_floor = std::max(sector_floor, neighbor_floor);
+    const float overlap_ceiling = std::min(sector_ceiling, neighbor_ceiling);
+
+    if (overlap_ceiling <= overlap_floor + 0.001F) {
+        add_wall_span(world, sector_id, a, b, sector_floor, sector_ceiling, material_id, surface);
+        return;
+    }
+
+    add_wall_span(world, sector_id, a, b, sector_floor, overlap_floor, material_id, surface);
+    add_wall_span(world, sector_id, a, b, overlap_ceiling, sector_ceiling, material_id, surface);
 }
 
 std::vector<int> unique_sorted(std::vector<int> values) {
@@ -191,7 +284,8 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
     world.sectors.reserve(sectors.size());
 
     for (std::size_t sector_index = 0; sector_index < sectors.size(); ++sector_index) {
-        const SectorPlane& source = sectors[sector_index];
+        SectorPlane source = sectors[sector_index];
+        normalize_materials(source);
         RuntimeSector runtime_sector;
         runtime_sector.outer = source.outer;
         runtime_sector.holes = source.holes;
@@ -200,7 +294,13 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
         runtime_sector.height = source.height;
 
         for (const int neighbor : source.edge_neighbors) {
-            if (neighbor >= 0) {
+            if (neighbor >= 0 && neighbor < static_cast<int>(sectors.size()) &&
+                vertical_ranges_overlap(
+                    source.floor_height,
+                    source.height,
+                    sectors[static_cast<std::size_t>(neighbor)].floor_height,
+                    sectors[static_cast<std::size_t>(neighbor)].height
+                )) {
                 insert_unique(runtime_sector.neighbors, neighbor);
             }
         }
@@ -209,49 +309,70 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
         insert_sector_cells(world, static_cast<int>(sector_index), world.sectors.back().bounds);
 
         for (const Triangle& triangle : source.triangles) {
-            world.triangles.push_back(RuntimeTaggedTriangle{
+            add_triangle(
+                world,
+                static_cast<int>(sector_index),
                 RuntimeTriangle{
                     floor_vertex(triangle.a, source.floor_height),
                     floor_vertex(triangle.b, source.floor_height),
                     floor_vertex(triangle.c, source.floor_height),
                 },
+                source.floor_material,
+                RuntimeSurfaceRef{RuntimeSurfaceKind::Floor, -1, -1}
+            );
+            add_triangle(
+                world,
                 static_cast<int>(sector_index),
-            });
-            world.triangles.push_back(RuntimeTaggedTriangle{
                 RuntimeTriangle{
                     ceiling_vertex(triangle.c, source.floor_height, source.height),
                     ceiling_vertex(triangle.b, source.floor_height, source.height),
                     ceiling_vertex(triangle.a, source.floor_height, source.height),
                 },
-                static_cast<int>(sector_index),
-            });
+                source.ceiling_material,
+                RuntimeSurfaceRef{RuntimeSurfaceKind::Ceiling, -1, -1}
+            );
         }
 
         for (std::size_t edge_index = 0; edge_index < source.outer.vertices.size(); ++edge_index) {
             const int neighbor = edge_index < source.edge_neighbors.size() ? source.edge_neighbors[edge_index] : -1;
-            if (neighbor >= 0) {
-                continue;
+            const Vec2 a = source.outer.vertices[edge_index];
+            const Vec2 b = source.outer.vertices[(edge_index + 1) % source.outer.vertices.size()];
+            const int material_id = edge_index < source.wall_materials.size()
+                ? source.wall_materials[edge_index]
+                : kDefaultMaterialId;
+            const RuntimeSurfaceRef surface{RuntimeSurfaceKind::Wall, static_cast<int>(edge_index), -1};
+            if (neighbor >= 0 && neighbor < static_cast<int>(sectors.size())) {
+                add_neighbor_gap_walls(
+                    world,
+                    static_cast<int>(sector_index),
+                    source,
+                    sectors[static_cast<std::size_t>(neighbor)],
+                    a,
+                    b,
+                    material_id,
+                    surface
+                );
+            } else {
+                add_wall(world, static_cast<int>(sector_index), a, b, source.floor_height, source.height, material_id, surface);
             }
-
-            add_wall(
-                world,
-                static_cast<int>(sector_index),
-                source.outer.vertices[edge_index],
-                source.outer.vertices[(edge_index + 1) % source.outer.vertices.size()],
-                source.floor_height,
-                source.height
-            );
         }
 
-        for (const PolygonLoop& hole : source.holes) {
+        for (std::size_t hole_index = 0; hole_index < source.holes.size(); ++hole_index) {
+            const PolygonLoop& hole = source.holes[hole_index];
             for (std::size_t i = 0; i < hole.vertices.size(); ++i) {
+                const int material_id = hole_index < source.hole_wall_materials.size() &&
+                        i < source.hole_wall_materials[hole_index].size()
+                    ? source.hole_wall_materials[hole_index][i]
+                    : kDefaultMaterialId;
                 add_wall(
                     world,
                     static_cast<int>(sector_index),
                     hole.vertices[i],
                     hole.vertices[(i + 1) % hole.vertices.size()],
                     source.floor_height,
-                    source.height
+                    source.height,
+                    material_id,
+                    RuntimeSurfaceRef{RuntimeSurfaceKind::HoleWall, static_cast<int>(hole_index), static_cast<int>(i)}
                 );
             }
         }

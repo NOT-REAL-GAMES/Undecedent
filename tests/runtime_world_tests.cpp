@@ -63,6 +63,26 @@ int main() {
 
     {
         std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sectors.front().height = 128.0F;
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        expect(contains(world.sectors[0].neighbors, 1), "height-offset sectors should stay linked when volumes overlap");
+        expect(world.walls.size() == 7, "height mismatch should create one shared-edge wall gap");
+        expect(world.triangles.size() == 22, "height mismatch should render the wall gap triangles");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sectors.back().floor_height = 128.0F;
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        expect(!contains(world.sectors[0].neighbors, 1), "non-overlapping sectors should not be runtime neighbors");
+        expect(!contains(world.sectors[1].neighbors, 0), "non-overlapping reverse neighbor should be suppressed");
+        expect(world.walls.size() == 8, "non-overlapping neighbor volumes should close both shared edges");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
         sectors = add(std::move(sectors), loop({{20, 0}, {30, 0}, {30, 10}, {20, 10}}));
         const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
         expect(undecedent::sector_at_point(world, Vec3{5, 0, 5}) == 0, "point lookup should find first sector");
@@ -106,7 +126,22 @@ int main() {
         expect(!world.triangles.empty(), "runtime world should generate render triangles");
         for (const undecedent::RuntimeTaggedTriangle& triangle : world.triangles) {
             expect(triangle.sector_id == 0, "runtime triangles should retain source sector id");
+            expect(triangle.material_id == 0, "runtime triangles should default to material 0");
         }
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_material = 5;
+        sectors.front().ceiling_material = 6;
+        sectors.front().wall_materials = {1, 2, 3, 4};
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        expect(world.triangles[0].material_id == 5, "runtime floor should retain material id");
+        expect(world.triangles[1].material_id == 6, "runtime ceiling should retain material id");
+        expect(world.triangles[4].material_id == 1, "runtime wall should retain material id");
+        expect(world.triangles[4].surface.kind == undecedent::RuntimeSurfaceKind::Wall,
+            "runtime wall should retain surface kind");
+        expect(world.triangles[4].surface.index == 0, "runtime wall should retain edge index");
     }
 
     return EXIT_SUCCESS;

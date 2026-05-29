@@ -24,6 +24,7 @@ add_executable(Undecedent
     main.cpp
     src/csg.cpp
     src/map_io.cpp
+    src/physics.cpp
     src/runtime_geometry.cpp
     src/runtime_world.cpp
     src/triangulator.cpp
@@ -56,6 +57,12 @@ add_executable(UndecedentCsgTests
 
 target_include_directories(UndecedentCsgTests PRIVATE include)
 
+add_executable(UndecedentEditorSliceTests
+    tests/editor_slice_tests.cpp
+)
+
+target_include_directories(UndecedentEditorSliceTests PRIVATE include)
+
 add_executable(UndecedentRuntimeGeometryTests
     tests/runtime_geometry_tests.cpp
     src/csg.cpp
@@ -73,6 +80,16 @@ add_executable(UndecedentRuntimeWorldTests
 )
 
 target_include_directories(UndecedentRuntimeWorldTests PRIVATE include)
+
+add_executable(UndecedentPhysicsTests
+    tests/physics_tests.cpp
+    src/csg.cpp
+    src/physics.cpp
+    src/runtime_world.cpp
+    src/triangulator.cpp
+)
+
+target_include_directories(UndecedentPhysicsTests PRIVATE include)
 
 add_executable(UndecedentMapIoTests
     tests/map_io_tests.cpp

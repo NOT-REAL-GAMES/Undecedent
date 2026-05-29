@@ -6,20 +6,29 @@
 
 namespace undecedent {
 
-struct Vec3 {
-    float x = 0.0F;
-    float y = 0.0F;
-    float z = 0.0F;
-};
-
 struct RuntimeTriangle {
     Vec3 a;
     Vec3 b;
     Vec3 c;
 };
 
+enum class RuntimeSurfaceKind {
+    Floor,
+    Ceiling,
+    Wall,
+    HoleWall,
+};
+
+struct RuntimeSurfaceRef {
+    RuntimeSurfaceKind kind = RuntimeSurfaceKind::Floor;
+    int index = -1;
+    int sub_index = -1;
+};
+
 struct RuntimeGeometry {
     std::vector<RuntimeTriangle> triangles;
+    std::vector<int> material_ids;
+    std::vector<RuntimeSurfaceRef> surfaces;
 };
 
 RuntimeGeometry build_runtime_geometry(const std::vector<SectorPlane>& sectors);

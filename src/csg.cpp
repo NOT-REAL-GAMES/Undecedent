@@ -46,6 +46,10 @@ bool operator==(const GridPoint& a, const GridPoint& b) {
     return a.x == b.x && a.y == b.y;
 }
 
+std::int64_t to_grid_height(const float value) {
+    return static_cast<std::int64_t>(std::llround(static_cast<double>(value) * kCsgScale));
+}
+
 GridPoint to_grid(const Vec2 point) {
     return GridPoint{
         static_cast<std::int64_t>(std::llround(static_cast<double>(point.x) * kCsgScale)),
@@ -58,6 +62,22 @@ Vec2 to_vec2(const GridPoint point) {
         static_cast<float>(static_cast<double>(point.x) / kCsgScale),
         static_cast<float>(static_cast<double>(point.y) / kCsgScale),
     };
+}
+
+void normalize_materials(SectorPlane& sector) {
+    sector.floor_material = clamped_material_id(sector.floor_material);
+    sector.ceiling_material = clamped_material_id(sector.ceiling_material);
+    sector.wall_materials.resize(sector.outer.vertices.size(), kDefaultMaterialId);
+    for (int& material : sector.wall_materials) {
+        material = clamped_material_id(material);
+    }
+    sector.hole_wall_materials.resize(sector.holes.size());
+    for (std::size_t hole_index = 0; hole_index < sector.holes.size(); ++hole_index) {
+        sector.hole_wall_materials[hole_index].resize(sector.holes[hole_index].vertices.size(), kDefaultMaterialId);
+        for (int& material : sector.hole_wall_materials[hole_index]) {
+            material = clamped_material_id(material);
+        }
+    }
 }
 
 double cross(const GridPoint a, const GridPoint b, const GridPoint c) {
@@ -243,6 +263,32 @@ bool point_in_polygon_or_on(const PolygonLoop& loop, const Vec2 point) {
     return inside;
 }
 
+bool loop_contains_loop(const PolygonLoop& outer, const PolygonLoop& inner) {
+    if (outer.vertices.size() < 3 || inner.vertices.size() < 3) {
+        return false;
+    }
+
+    return std::all_of(inner.vertices.begin(), inner.vertices.end(), [&outer](const Vec2 point) {
+        return point_in_polygon_or_on(outer, point);
+    });
+}
+
+void copy_contained_holes(SectorPlane& sector, const SectorPlane& source) {
+    for (std::size_t hole_index = 0; hole_index < source.holes.size(); ++hole_index) {
+        const PolygonLoop& hole = source.holes[hole_index];
+        if (!loop_contains_loop(sector.outer, hole)) {
+            continue;
+        }
+
+        sector.holes.push_back(hole);
+        if (hole_index < source.hole_wall_materials.size()) {
+            sector.hole_wall_materials.push_back(source.hole_wall_materials[hole_index]);
+        } else {
+            sector.hole_wall_materials.push_back({});
+        }
+    }
+}
+
 PolygonLoop clean_loop(std::vector<GridPoint> points) {
     std::vector<GridPoint> cleaned;
     for (const GridPoint point : points) {
@@ -309,6 +355,19 @@ bool in_existing_union(const std::vector<SectorPlane>& sectors, const Vec2 point
     });
 }
 
+bool same_floor_group(const SectorPlane& sector, const float floor_height) {
+    return to_grid_height(sector.floor_height) == to_grid_height(floor_height);
+}
+
+bool vertical_ranges_overlap(const SectorPlane& a, const SectorPlane& b) {
+    const std::int64_t lower = std::max(to_grid_height(a.floor_height), to_grid_height(b.floor_height));
+    const std::int64_t upper = std::min(
+        to_grid_height(a.floor_height + a.height),
+        to_grid_height(b.floor_height + b.height)
+    );
+    return upper > lower;
+}
+
 const SectorPlane* source_sector_for_point(const std::vector<SectorPlane>& sectors, const Vec2 point) {
     const auto found = std::find_if(sectors.begin(), sectors.end(), [point](const SectorPlane& sector) {
         if (!point_in_polygon_or_on(sector.outer, point)) {
@@ -322,15 +381,16 @@ const SectorPlane* source_sector_for_point(const std::vector<SectorPlane>& secto
 }
 
 void rebuild_edges(std::vector<SectorPlane>& sectors) {
-    std::map<std::pair<GridPoint, GridPoint>, std::pair<int, int>> directed_edges;
+    std::map<std::pair<GridPoint, GridPoint>, std::vector<std::pair<int, int>>> directed_edges;
 
     for (std::size_t sector_index = 0; sector_index < sectors.size(); ++sector_index) {
         SectorPlane& sector = sectors[sector_index];
+        normalize_materials(sector);
         sector.edge_neighbors.assign(sector.outer.vertices.size(), -1);
         for (std::size_t edge_index = 0; edge_index < sector.outer.vertices.size(); ++edge_index) {
             const GridPoint a = to_grid(sector.outer.vertices[edge_index]);
             const GridPoint b = to_grid(sector.outer.vertices[(edge_index + 1) % sector.outer.vertices.size()]);
-            directed_edges[{a, b}] = {static_cast<int>(sector_index), static_cast<int>(edge_index)};
+            directed_edges[{a, b}].push_back({static_cast<int>(sector_index), static_cast<int>(edge_index)});
         }
     }
 
@@ -340,8 +400,18 @@ void rebuild_edges(std::vector<SectorPlane>& sectors) {
             const GridPoint a = to_grid(sector.outer.vertices[edge_index]);
             const GridPoint b = to_grid(sector.outer.vertices[(edge_index + 1) % sector.outer.vertices.size()]);
             const auto found = directed_edges.find({b, a});
-            if (found != directed_edges.end()) {
-                sector.edge_neighbors[edge_index] = found->second.first;
+            if (found == directed_edges.end()) {
+                continue;
+            }
+
+            for (const auto [neighbor_sector, _] : found->second) {
+                if (neighbor_sector == static_cast<int>(sector_index)) {
+                    continue;
+                }
+                if (vertical_ranges_overlap(sector, sectors[static_cast<std::size_t>(neighbor_sector)])) {
+                    sector.edge_neighbors[edge_index] = neighbor_sector;
+                    break;
+                }
             }
         }
     }
@@ -483,7 +553,9 @@ bool keep_face(
 CsgAddResult run_csg(
     const std::vector<SectorPlane>& existing_sectors,
     const PolygonLoop* operand,
-    const CsgOperation operation
+    const CsgOperation operation,
+    const float new_sector_floor_height = 0.0F,
+    const float new_sector_height = 96.0F
 ) {
     if (operand != nullptr) {
         const TriangulationResult operand_validation = triangulate_polygon(*operand);
@@ -618,8 +690,14 @@ CsgAddResult run_csg(
             if (const SectorPlane* source = source_sector_for_point(existing_sectors, sample)) {
                 sector.floor_height = source->floor_height;
                 sector.height = source->height;
+                sector.floor_material = source->floor_material;
+                sector.ceiling_material = source->ceiling_material;
+                copy_contained_holes(sector, *source);
+            } else if (operation == CsgOperation::Add) {
+                sector.floor_height = new_sector_floor_height;
+                sector.height = new_sector_height;
             }
-            const TriangulationResult triangulated = triangulate_polygon(sector.outer);
+            const TriangulationResult triangulated = triangulate_polygon(sector.outer, sector.holes);
             if (triangulated.status != TriangulationStatus::Ok) {
                 continue;
             }
@@ -628,6 +706,7 @@ CsgAddResult run_csg(
             sector.status = triangulated.status;
             sector.status_message = triangulated.message;
             sector.edge_neighbors.assign(sector.outer.vertices.size(), -1);
+            normalize_materials(sector);
             output.push_back(std::move(sector));
         }
     }
@@ -647,6 +726,37 @@ CsgAddResult run_csg(
 
     rebuild_edges(output);
     return CsgAddResult{true, "Ok", std::move(output)};
+}
+
+CsgAddResult combine_scoped_result(
+    const std::vector<SectorPlane>& existing_sectors,
+    std::vector<SectorPlane> active_result,
+    const float floor_height
+) {
+    std::vector<SectorPlane> output;
+    output.reserve(existing_sectors.size() + active_result.size());
+    for (const SectorPlane& sector : existing_sectors) {
+        if (!same_floor_group(sector, floor_height)) {
+            output.push_back(sector);
+        }
+    }
+    output.insert(
+        output.end(),
+        std::make_move_iterator(active_result.begin()),
+        std::make_move_iterator(active_result.end())
+    );
+    rebuild_edges(output);
+    return CsgAddResult{true, "Ok", std::move(output)};
+}
+
+std::vector<SectorPlane> sectors_at_floor(const std::vector<SectorPlane>& sectors, const float floor_height) {
+    std::vector<SectorPlane> active;
+    for (const SectorPlane& sector : sectors) {
+        if (same_floor_group(sector, floor_height)) {
+            active.push_back(sector);
+        }
+    }
+    return active;
 }
 
 CsgAddResult contained_hole_subtract_fallback(
@@ -688,6 +798,7 @@ CsgAddResult contained_hole_subtract_fallback(
         holed_sector.triangles = triangulated.triangles;
         holed_sector.status = triangulated.status;
         holed_sector.status_message = triangulated.message;
+        normalize_materials(holed_sector);
         output.push_back(std::move(holed_sector));
         changed = true;
     }
@@ -892,15 +1003,42 @@ CsgAddResult merge_selected_sectors(
     merged.status = triangulated.status;
     merged.status_message = triangulated.message;
     merged.edge_neighbors.assign(merged.outer.vertices.size(), -1);
+    normalize_materials(merged);
 
     std::vector<SectorPlane> output;
     output.reserve(sectors.size() - selected.size() + 1);
     for (std::size_t i = 0; i < sectors.size(); ++i) {
         if (!selected_set.contains(static_cast<int>(i))) {
-            output.push_back(sectors[i]);
+            SectorPlane sector = sectors[i];
+            normalize_materials(sector);
+            output.push_back(std::move(sector));
         }
     }
     output.push_back(std::move(merged));
+    rebuild_edges(output);
+    return CsgAddResult{true, "Ok", std::move(output)};
+}
+
+CsgAddResult delete_selected_sectors(
+    const std::vector<SectorPlane>& sectors,
+    const std::vector<int>& selected_indices
+) {
+    const std::vector<int> selected = normalize_selection(sectors, selected_indices);
+    if (selected.empty()) {
+        return CsgAddResult{false, "Select at least one sector to delete.", sectors};
+    }
+
+    const std::set<int> selected_set(selected.begin(), selected.end());
+    std::vector<SectorPlane> output;
+    output.reserve(sectors.size() - selected.size());
+    for (std::size_t i = 0; i < sectors.size(); ++i) {
+        if (!selected_set.contains(static_cast<int>(i))) {
+            SectorPlane sector = sectors[i];
+            normalize_materials(sector);
+            output.push_back(std::move(sector));
+        }
+    }
+
     rebuild_edges(output);
     return CsgAddResult{true, "Ok", std::move(output)};
 }
@@ -911,6 +1049,21 @@ CsgAddResult csg_add_sector(const std::vector<SectorPlane>& existing_sectors, co
     return run_csg(existing_sectors, &added_outer, CsgOperation::Add);
 }
 
+CsgAddResult csg_add_sector_at_floor(
+    const std::vector<SectorPlane>& existing_sectors,
+    const PolygonLoop& added_outer,
+    const float floor_height,
+    const float default_height
+) {
+    std::vector<SectorPlane> active = sectors_at_floor(existing_sectors, floor_height);
+    CsgAddResult active_result =
+        run_csg(active, &added_outer, CsgOperation::Add, floor_height, default_height);
+    if (!active_result.ok) {
+        return CsgAddResult{false, active_result.message, existing_sectors};
+    }
+    return combine_scoped_result(existing_sectors, std::move(active_result.sectors), floor_height);
+}
+
 CsgAddResult csg_subtract_sector(const std::vector<SectorPlane>& existing_sectors, const PolygonLoop& cut_loop) {
     CsgAddResult result = run_csg(existing_sectors, &cut_loop, CsgOperation::Subtract);
     if (!result.ok || !result.sectors.empty() || cut_touches_existing_edges(existing_sectors, cut_loop)) {
@@ -919,12 +1072,60 @@ CsgAddResult csg_subtract_sector(const std::vector<SectorPlane>& existing_sector
     return contained_hole_subtract_fallback(existing_sectors, cut_loop);
 }
 
+CsgAddResult csg_subtract_sector_at_floor(
+    const std::vector<SectorPlane>& existing_sectors,
+    const PolygonLoop& cut_loop,
+    const float floor_height
+) {
+    std::vector<SectorPlane> active = sectors_at_floor(existing_sectors, floor_height);
+    if (active.empty()) {
+        return CsgAddResult{true, "Ok", existing_sectors};
+    }
+
+    CsgAddResult active_result = run_csg(active, &cut_loop, CsgOperation::Subtract);
+    if (!active_result.ok) {
+        return CsgAddResult{false, active_result.message, existing_sectors};
+    }
+    if (active_result.sectors.empty() && !cut_touches_existing_edges(active, cut_loop)) {
+        active_result = contained_hole_subtract_fallback(active, cut_loop);
+        if (!active_result.ok) {
+            return CsgAddResult{false, active_result.message, existing_sectors};
+        }
+    }
+
+    return combine_scoped_result(existing_sectors, std::move(active_result.sectors), floor_height);
+}
+
 CsgAddResult csg_rebuild_sectors(const std::vector<SectorPlane>& sectors) {
-    return run_csg(sectors, nullptr, CsgOperation::Rebuild);
+    std::map<std::int64_t, std::vector<SectorPlane>> floor_groups;
+    for (const SectorPlane& sector : sectors) {
+        floor_groups[to_grid_height(sector.floor_height)].push_back(sector);
+    }
+
+    std::vector<SectorPlane> rebuilt;
+    rebuilt.reserve(sectors.size());
+    for (const auto& [_, floor_sectors] : floor_groups) {
+        CsgAddResult result = run_csg(floor_sectors, nullptr, CsgOperation::Rebuild);
+        if (!result.ok) {
+            return CsgAddResult{false, result.message, sectors};
+        }
+        rebuilt.insert(
+            rebuilt.end(),
+            std::make_move_iterator(result.sectors.begin()),
+            std::make_move_iterator(result.sectors.end())
+        );
+    }
+
+    rebuild_edges(rebuilt);
+    return CsgAddResult{true, "Ok", std::move(rebuilt)};
 }
 
 CsgAddResult csg_merge_sectors(const std::vector<SectorPlane>& sectors, const std::vector<int>& selected_indices) {
     return merge_selected_sectors(sectors, selected_indices);
+}
+
+CsgAddResult csg_delete_sectors(const std::vector<SectorPlane>& sectors, const std::vector<int>& selected_indices) {
+    return delete_selected_sectors(sectors, selected_indices);
 }
 
 } // namespace undecedent

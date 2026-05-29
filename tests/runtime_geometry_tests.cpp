@@ -38,6 +38,8 @@ int main() {
         SectorPlane sector;
         expect(sector.height == 96.0F, "sector default height should be 96");
         expect(sector.floor_height == 0.0F, "sector default floor should be 0");
+        expect(sector.floor_material == 0, "sector default floor material should be 0");
+        expect(sector.ceiling_material == 0, "sector default ceiling material should be 0");
     }
 
     {
@@ -45,7 +47,24 @@ int main() {
         sectors.front().floor_height = 32.0F;
         const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(sectors);
         expect(geometry.triangles.size() == 12, "single rectangle should create 2 floor, 2 ceiling, and 8 wall triangles");
+        expect(geometry.material_ids.size() == geometry.triangles.size(), "runtime geometry should tag every triangle with a material");
+        expect(geometry.surfaces.size() == geometry.triangles.size(), "runtime geometry should tag every triangle with a surface");
         expect(geometry.triangles.front().a.y == 32.0F, "floor offset should move floor triangles");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_material = 2;
+        sectors.front().ceiling_material = 3;
+        sectors.front().wall_materials = {4, 5, 6, 7};
+        const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(sectors);
+        expect(geometry.material_ids[0] == 2, "floor triangle should use floor material");
+        expect(geometry.material_ids[1] == 3, "ceiling triangle should use ceiling material");
+        expect(geometry.material_ids[4] == 4, "first wall should use first wall material");
+        expect(geometry.material_ids[6] == 5, "second wall should use second wall material");
+        expect(geometry.surfaces[0].kind == undecedent::RuntimeSurfaceKind::Floor, "floor should retain surface identity");
+        expect(geometry.surfaces[4].kind == undecedent::RuntimeSurfaceKind::Wall, "wall should retain surface identity");
+        expect(geometry.surfaces[4].index == 0, "wall should retain edge index");
     }
 
     {
@@ -53,6 +72,22 @@ int main() {
         sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
         const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(sectors);
         expect(geometry.triangles.size() == 20, "two adjacent rectangles should omit the shared wall");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sectors.front().height = 128.0F;
+        const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(sectors);
+        expect(geometry.triangles.size() == 22, "height mismatch should add a shared-edge wall gap");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sectors.back().floor_height = 128.0F;
+        const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(sectors);
+        expect(geometry.triangles.size() == 24, "non-overlapping neighbor volumes should close both shared edges");
     }
 
     {
