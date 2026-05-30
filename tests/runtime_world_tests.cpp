@@ -1,4 +1,6 @@
 #include "undecedent/csg.hpp"
+#include "undecedent/runtime_render.hpp"
+#include "undecedent/runtime_visibility.hpp"
 #include "undecedent/runtime_world.hpp"
 
 #include <algorithm>
@@ -37,6 +39,22 @@ bool contains(const std::vector<int>& values, const int value) {
     return std::find(values.begin(), values.end(), value) != values.end();
 }
 
+undecedent::GameCamera camera_at(
+    const float x,
+    const float y,
+    const float z,
+    const float yaw,
+    const float pitch = 0.0F
+) {
+    undecedent::GameCamera camera{};
+    camera.x = x;
+    camera.y = y;
+    camera.z = z;
+    camera.yaw = yaw;
+    camera.pitch = pitch;
+    return camera;
+}
+
 } // namespace
 
 int main() {
@@ -58,6 +76,9 @@ int main() {
         expect(world.sectors.size() == 2, "two source sectors should create two runtime sectors");
         expect(contains(world.sectors[0].neighbors, 1), "first sector should link to second sector");
         expect(contains(world.sectors[1].neighbors, 0), "second sector should link to first sector");
+        expect(world.portals.size() == 2, "adjacent rectangles should create one directed portal per side");
+        expect(!world.sectors[0].portal_ids.empty(), "first sector should expose a runtime portal");
+        expect(!world.sectors[1].portal_ids.empty(), "second sector should expose a runtime portal");
         expect(world.walls.size() == 6, "adjacent rectangles should omit the shared wall segment");
     }
 
@@ -118,6 +139,120 @@ int main() {
         const std::vector<int> visible = undecedent::visible_sectors_from(world, 0);
         expect(contains(visible, 0) && contains(visible, 1), "visible traversal should include connected sectors");
         expect(!contains(visible, 2), "visible traversal should not include disconnected sectors");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(5.0F, 48.0F, 5.0F, -1.5707963F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(visible.size() == 1 && contains(visible, 0), "portal visibility should include the containing sector");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(5.0F, 48.0F, 5.0F, -1.5707963F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(contains(visible, 0) && contains(visible, 1), "portal visibility should traverse a visible portal");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(5.0F, 48.0F, 5.0F, 1.5707963F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(contains(visible, 0), "portal visibility should keep the containing sector when the portal is behind");
+        expect(!contains(visible, 1), "portal visibility should reject a portal behind the camera");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sectors = add(std::move(sectors), loop({{40, 0}, {50, 0}, {50, 10}, {40, 10}}));
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(5.0F, 48.0F, 5.0F, -1.5707963F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(contains(visible, 0) && contains(visible, 1), "portal visibility should keep the visible connected island");
+        expect(!contains(visible, 2), "portal visibility should reject disconnected sectors");
+    }
+
+    {
+        std::vector<SectorPlane> sectors(3);
+        sectors[0].outer = loop({{0, 0}, {10, 0}, {10, 2}, {0, 2}});
+        sectors[0].edge_neighbors = {-1, 1, -1, -1};
+        sectors[1].outer = loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}, {10, 2}});
+        sectors[1].edge_neighbors = {-1, -1, 2, -1, 0};
+        sectors[2].outer = loop({{10, 10}, {20, 10}, {20, 20}, {10, 20}});
+        sectors[2].edge_neighbors = {1, -1, -1, -1};
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const int camera_corridor = undecedent::sector_at_point(world, Vec3{5.0F, 48.0F, 1.0F});
+        const int forward_corridor = undecedent::sector_at_point(world, Vec3{15.0F, 48.0F, 5.0F});
+        const int side_room = undecedent::sector_at_point(world, Vec3{15.0F, 48.0F, 15.0F});
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(5.0F, 48.0F, 1.0F, -1.5707963F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(camera_corridor >= 0 && forward_corridor >= 0 && side_room >= 0, "corridor test sectors should exist");
+        expect(contains(visible, camera_corridor), "portal visibility should keep the camera corridor");
+        expect(contains(visible, forward_corridor), "portal visibility should traverse the corridor ahead");
+        expect(!contains(visible, side_room), "portal visibility should cull a side room hidden behind a turned corner");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(100.0F, 48.0F, 100.0F, -1.5707963F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(visible.empty(), "portal visibility should return empty outside all sectors for draw-all fallback");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sectors.front().height = 300.0F;
+        sectors.back().floor_height = 200.0F;
+        sectors.back().height = 50.0F;
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(5.0F, 48.0F, 5.0F, -1.5707963F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(contains(visible, 0), "vertical portal visibility should keep the containing sector");
+        expect(!contains(visible, 1), "vertical portal visibility should reject a portal outside the camera view");
     }
 
     {

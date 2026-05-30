@@ -35,6 +35,12 @@ CsgAddResult csg_subtract_sector_at_floor(
     const PolygonLoop& cut_loop,
     float floor_height
 );
+CsgAddResult csg_split_sectors_by_line_at_floor(
+    const std::vector<SectorPlane>& existing_sectors,
+    Vec2 a,
+    Vec2 b,
+    float floor_height
+);
 CsgAddResult csg_rebuild_sectors(const std::vector<SectorPlane>& sectors);
 CsgAddResult csg_merge_sectors(
     const std::vector<SectorPlane>& sectors,

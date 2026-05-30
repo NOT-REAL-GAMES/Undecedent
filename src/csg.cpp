@@ -147,6 +147,138 @@ bool on_segment(const Segment& segment, const GridPoint point) {
         point.y <= std::max(segment.a.y, segment.b.y);
 }
 
+double collinear_overlap_length(const Segment& source, const GridPoint a, const GridPoint b) {
+    if (std::abs(cross(source.a, source.b, a)) > kCsgEpsilon ||
+        std::abs(cross(source.a, source.b, b)) > kCsgEpsilon) {
+        return 0.0;
+    }
+
+    const std::int64_t source_dx = std::abs(source.b.x - source.a.x);
+    const std::int64_t source_dy = std::abs(source.b.y - source.a.y);
+    const bool use_x = source_dx >= source_dy;
+    const double source_min = static_cast<double>(std::min(use_x ? source.a.x : source.a.y, use_x ? source.b.x : source.b.y));
+    const double source_max = static_cast<double>(std::max(use_x ? source.a.x : source.a.y, use_x ? source.b.x : source.b.y));
+    const double edge_min = static_cast<double>(std::min(use_x ? a.x : a.y, use_x ? b.x : b.y));
+    const double edge_max = static_cast<double>(std::max(use_x ? a.x : a.y, use_x ? b.x : b.y));
+    return std::max(0.0, std::min(source_max, edge_max) - std::max(source_min, edge_min));
+}
+
+bool material_from_source_outer_edge(
+    const SectorPlane& source,
+    const GridPoint a,
+    const GridPoint b,
+    int& material
+) {
+    double best_overlap = 0.0;
+    int best_material = kDefaultMaterialId;
+    for (std::size_t edge_index = 0; edge_index < source.outer.vertices.size(); ++edge_index) {
+        const Segment edge{
+            to_grid(source.outer.vertices[edge_index]),
+            to_grid(source.outer.vertices[(edge_index + 1) % source.outer.vertices.size()]),
+            {},
+        };
+        const double overlap = collinear_overlap_length(edge, a, b);
+        if (overlap > best_overlap) {
+            best_overlap = overlap;
+            best_material = edge_index < source.wall_materials.size()
+                ? clamped_material_id(source.wall_materials[edge_index])
+                : kDefaultMaterialId;
+        }
+    }
+    if (best_overlap <= kCsgEpsilon) {
+        return false;
+    }
+    material = best_material;
+    return true;
+}
+
+bool material_from_source_hole_edge(
+    const SectorPlane& source,
+    const GridPoint a,
+    const GridPoint b,
+    int& material
+) {
+    double best_overlap = 0.0;
+    int best_material = kDefaultMaterialId;
+    for (std::size_t hole_index = 0; hole_index < source.holes.size(); ++hole_index) {
+        const PolygonLoop& hole = source.holes[hole_index];
+        for (std::size_t edge_index = 0; edge_index < hole.vertices.size(); ++edge_index) {
+            const Segment edge{
+                to_grid(hole.vertices[edge_index]),
+                to_grid(hole.vertices[(edge_index + 1) % hole.vertices.size()]),
+                {},
+            };
+            const double overlap = collinear_overlap_length(edge, a, b);
+            if (overlap > best_overlap) {
+                best_overlap = overlap;
+                best_material = hole_index < source.hole_wall_materials.size() &&
+                        edge_index < source.hole_wall_materials[hole_index].size()
+                    ? clamped_material_id(source.hole_wall_materials[hole_index][edge_index])
+                    : kDefaultMaterialId;
+            }
+        }
+    }
+    if (best_overlap <= kCsgEpsilon) {
+        return false;
+    }
+    material = best_material;
+    return true;
+}
+
+bool material_from_source_edges(
+    const std::vector<SectorPlane>& sources,
+    const GridPoint a,
+    const GridPoint b,
+    int& material
+) {
+    for (const SectorPlane& source : sources) {
+        if (material_from_source_outer_edge(source, a, b, material)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool material_from_source_hole_edges(
+    const std::vector<SectorPlane>& sources,
+    const GridPoint a,
+    const GridPoint b,
+    int& material
+) {
+    for (const SectorPlane& source : sources) {
+        if (material_from_source_hole_edge(source, a, b, material)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void remap_edge_materials_from_sources(SectorPlane& sector, const std::vector<SectorPlane>& sources) {
+    sector.wall_materials.assign(sector.outer.vertices.size(), kDefaultMaterialId);
+    for (std::size_t edge_index = 0; edge_index < sector.outer.vertices.size(); ++edge_index) {
+        int material = kDefaultMaterialId;
+        const GridPoint a = to_grid(sector.outer.vertices[edge_index]);
+        const GridPoint b = to_grid(sector.outer.vertices[(edge_index + 1) % sector.outer.vertices.size()]);
+        if (material_from_source_edges(sources, a, b, material)) {
+            sector.wall_materials[edge_index] = material;
+        }
+    }
+
+    sector.hole_wall_materials.resize(sector.holes.size());
+    for (std::size_t hole_index = 0; hole_index < sector.holes.size(); ++hole_index) {
+        const PolygonLoop& hole = sector.holes[hole_index];
+        sector.hole_wall_materials[hole_index].resize(hole.vertices.size(), kDefaultMaterialId);
+        for (std::size_t edge_index = 0; edge_index < hole.vertices.size(); ++edge_index) {
+            int material = sector.hole_wall_materials[hole_index][edge_index];
+            const GridPoint a = to_grid(hole.vertices[edge_index]);
+            const GridPoint b = to_grid(hole.vertices[(edge_index + 1) % hole.vertices.size()]);
+            if (material_from_source_hole_edges(sources, a, b, material)) {
+                sector.hole_wall_materials[hole_index][edge_index] = material;
+            }
+        }
+    }
+}
+
 void split_at_intersection(Segment& a, Segment& b) {
     const double ax = static_cast<double>(a.a.x);
     const double ay = static_cast<double>(a.a.y);
@@ -555,7 +687,8 @@ CsgAddResult run_csg(
     const PolygonLoop* operand,
     const CsgOperation operation,
     const float new_sector_floor_height = 0.0F,
-    const float new_sector_height = 96.0F
+    const float new_sector_height = 96.0F,
+    const std::vector<Segment>& extra_segments = {}
 ) {
     if (operand != nullptr) {
         const TriangulationResult operand_validation = triangulate_polygon(*operand);
@@ -581,6 +714,11 @@ CsgAddResult run_csg(
         add_loop_segments(segments, *operand);
         if (operation == CsgOperation::Subtract) {
             add_subtract_bridge_if_needed(segments, existing_sectors, *operand);
+        }
+    }
+    for (const Segment& segment : extra_segments) {
+        if (!(segment.a == segment.b)) {
+            segments.push_back(segment);
         }
     }
 
@@ -706,6 +844,7 @@ CsgAddResult run_csg(
             sector.status = triangulated.status;
             sector.status_message = triangulated.message;
             sector.edge_neighbors.assign(sector.outer.vertices.size(), -1);
+            remap_edge_materials_from_sources(sector, existing_sectors);
             normalize_materials(sector);
             output.push_back(std::move(sector));
         }
@@ -944,6 +1083,14 @@ CsgAddResult merge_selected_sectors(
     }
 
     const std::set<int> selected_set(selected.begin(), selected.end());
+    std::vector<SectorPlane> selected_sources;
+    selected_sources.reserve(selected.size());
+    for (const int sector_index : selected) {
+        SectorPlane source = sectors[static_cast<std::size_t>(sector_index)];
+        normalize_materials(source);
+        selected_sources.push_back(std::move(source));
+    }
+
     std::vector<std::pair<GridPoint, GridPoint>> boundary_edges;
     std::vector<PolygonLoop> boundary_loops;
 
@@ -984,6 +1131,8 @@ CsgAddResult merge_selected_sectors(
     SectorPlane merged;
     merged.floor_height = sectors[static_cast<std::size_t>(selected.front())].floor_height;
     merged.height = sectors[static_cast<std::size_t>(selected.front())].height;
+    merged.floor_material = selected_sources.front().floor_material;
+    merged.ceiling_material = selected_sources.front().ceiling_material;
     merged.outer = *outer;
     force_winding(merged.outer, true);
     for (std::size_t i = 0; i < boundary_loops.size(); ++i) {
@@ -1003,6 +1152,7 @@ CsgAddResult merge_selected_sectors(
     merged.status = triangulated.status;
     merged.status_message = triangulated.message;
     merged.edge_neighbors.assign(merged.outer.vertices.size(), -1);
+    remap_edge_materials_from_sources(merged, selected_sources);
     normalize_materials(merged);
 
     std::vector<SectorPlane> output;
@@ -1094,6 +1244,31 @@ CsgAddResult csg_subtract_sector_at_floor(
     }
 
     return combine_scoped_result(existing_sectors, std::move(active_result.sectors), floor_height);
+}
+
+CsgAddResult csg_split_sectors_by_line_at_floor(
+    const std::vector<SectorPlane>& existing_sectors,
+    const Vec2 a,
+    const Vec2 b,
+    const float floor_height
+) {
+    const Segment knife{to_grid(a), to_grid(b), {0.0, 1.0}};
+    if (knife.a == knife.b) {
+        return CsgAddResult{false, "Knife cut needs two distinct points.", existing_sectors};
+    }
+
+    std::vector<SectorPlane> active = sectors_at_floor(existing_sectors, floor_height);
+    if (active.empty()) {
+        return CsgAddResult{false, "No sectors on this Z slice to cut.", existing_sectors};
+    }
+
+    const CsgAddResult active_result =
+        run_csg(active, nullptr, CsgOperation::Rebuild, 0.0F, 96.0F, {knife});
+    if (!active_result.ok) {
+        return CsgAddResult{false, active_result.message, existing_sectors};
+    }
+
+    return combine_scoped_result(existing_sectors, active_result.sectors, floor_height);
 }
 
 CsgAddResult csg_rebuild_sectors(const std::vector<SectorPlane>& sectors) {

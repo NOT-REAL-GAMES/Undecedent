@@ -158,6 +158,24 @@ bool vertical_ranges_overlap(const float floor_a, const float height_a, const fl
     return upper > lower + 0.001F;
 }
 
+void add_portal_record(
+    RuntimeWorld& world,
+    const int from_sector,
+    const int to_sector,
+    const Vec2 a,
+    const Vec2 b,
+    const float bottom,
+    const float top
+) {
+    if (from_sector < 0 || from_sector >= static_cast<int>(world.sectors.size()) || top <= bottom + 0.001F) {
+        return;
+    }
+
+    const int portal_id = static_cast<int>(world.portals.size());
+    world.portals.push_back(RuntimePortal{a, b, from_sector, to_sector, bottom, top});
+    world.sectors[static_cast<std::size_t>(from_sector)].portal_ids.push_back(portal_id);
+}
+
 void add_triangle(
     RuntimeWorld& world,
     const int sector_id,
@@ -342,11 +360,26 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
                 : kDefaultMaterialId;
             const RuntimeSurfaceRef surface{RuntimeSurfaceKind::Wall, static_cast<int>(edge_index), -1};
             if (neighbor >= 0 && neighbor < static_cast<int>(sectors.size())) {
+                const SectorPlane& neighbor_sector = sectors[static_cast<std::size_t>(neighbor)];
+                const float portal_bottom = std::max(source.floor_height, neighbor_sector.floor_height);
+                const float portal_top = std::min(
+                    source.floor_height + source.height,
+                    neighbor_sector.floor_height + neighbor_sector.height
+                );
+                add_portal_record(
+                    world,
+                    static_cast<int>(sector_index),
+                    neighbor,
+                    a,
+                    b,
+                    portal_bottom,
+                    portal_top
+                );
                 add_neighbor_gap_walls(
                     world,
                     static_cast<int>(sector_index),
                     source,
-                    sectors[static_cast<std::size_t>(neighbor)],
+                    neighbor_sector,
                     a,
                     b,
                     material_id,

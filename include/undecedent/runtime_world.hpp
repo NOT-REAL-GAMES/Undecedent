@@ -29,11 +29,21 @@ struct RuntimeWallSegment {
     int sector_id = -1;
 };
 
+struct RuntimePortal {
+    Vec2 a;
+    Vec2 b;
+    int from_sector = -1;
+    int to_sector = -1;
+    float bottom = 0.0F;
+    float top = 0.0F;
+};
+
 struct RuntimeSector {
     PolygonLoop outer;
     std::vector<PolygonLoop> holes;
     RuntimeBounds2 bounds;
     std::vector<int> neighbors;
+    std::vector<int> portal_ids;
     float floor_height = 0.0F;
     float height = 96.0F;
 };
@@ -48,6 +58,7 @@ struct RuntimeWorld {
     std::vector<RuntimeSector> sectors;
     std::vector<RuntimeTaggedTriangle> triangles;
     std::vector<RuntimeWallSegment> walls;
+    std::vector<RuntimePortal> portals;
     std::map<std::pair<int, int>, RuntimeSpatialCell> spatial_cells;
 };
 

@@ -1,5 +1,6 @@
 #include "undecedent/csg.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -92,6 +93,20 @@ std::vector<SectorPlane> subtract(std::vector<SectorPlane> sectors, const Polygo
     return result.sectors;
 }
 
+std::vector<SectorPlane> knife(
+    const std::vector<SectorPlane>& sectors,
+    const Vec2 a,
+    const Vec2 b,
+    const float floor_height = 0.0F
+) {
+    const undecedent::CsgAddResult result = undecedent::csg_split_sectors_by_line_at_floor(sectors, a, b, floor_height);
+    if (!result.ok) {
+        std::cerr << "CSG knife failed: " << result.message << '\n';
+        std::exit(EXIT_FAILURE);
+    }
+    return result.sectors;
+}
+
 std::vector<SectorPlane> merge(const std::vector<SectorPlane>& sectors, const std::vector<int>& selected) {
     const undecedent::CsgAddResult result = undecedent::csg_merge_sectors(sectors, selected);
     if (!result.ok) {
@@ -157,6 +172,88 @@ bool materials_are_valid(const std::vector<SectorPlane>& sectors) {
     return true;
 }
 
+bool point_in_triangle(const Vec2 point, const undecedent::Triangle& triangle) {
+    const auto cross = [](const Vec2 a, const Vec2 b, const Vec2 c) {
+        return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
+    };
+    const float ab = cross(triangle.a, triangle.b, point);
+    const float bc = cross(triangle.b, triangle.c, point);
+    const float ca = cross(triangle.c, triangle.a, point);
+    return (ab >= -0.001F && bc >= -0.001F && ca >= -0.001F) ||
+        (ab <= 0.001F && bc <= 0.001F && ca <= 0.001F);
+}
+
+bool sector_contains_point(const SectorPlane& sector, const Vec2 point) {
+    return std::any_of(sector.triangles.begin(), sector.triangles.end(), [point](const undecedent::Triangle& triangle) {
+        return point_in_triangle(point, triangle);
+    });
+}
+
+SectorPlane& sector_at_point(std::vector<SectorPlane>& sectors, const Vec2 point) {
+    const auto found = std::find_if(sectors.begin(), sectors.end(), [point](const SectorPlane& sector) {
+        return sector_contains_point(sector, point);
+    });
+    if (found == sectors.end()) {
+        std::cerr << "Expected sector at point " << point.x << ", " << point.y << '\n';
+        std::exit(EXIT_FAILURE);
+    }
+    return *found;
+}
+
+const SectorPlane& sector_at_point(const std::vector<SectorPlane>& sectors, const Vec2 point) {
+    const auto found = std::find_if(sectors.begin(), sectors.end(), [point](const SectorPlane& sector) {
+        return sector_contains_point(sector, point);
+    });
+    if (found == sectors.end()) {
+        std::cerr << "Expected sector at point " << point.x << ", " << point.y << '\n';
+        std::exit(EXIT_FAILURE);
+    }
+    return *found;
+}
+
+float cross(const Vec2 a, const Vec2 b, const Vec2 c) {
+    return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
+}
+
+bool on_segment(const Vec2 a, const Vec2 b, const Vec2 point) {
+    return std::abs(cross(a, b, point)) <= 0.001F &&
+        point.x >= std::min(a.x, b.x) - 0.001F &&
+        point.x <= std::max(a.x, b.x) + 0.001F &&
+        point.y >= std::min(a.y, b.y) - 0.001F &&
+        point.y <= std::max(a.y, b.y) + 0.001F;
+}
+
+int outer_material_on_segment(const SectorPlane& sector, const Vec2 a, const Vec2 b) {
+    for (std::size_t i = 0; i < sector.outer.vertices.size(); ++i) {
+        const Vec2 edge_a = sector.outer.vertices[i];
+        const Vec2 edge_b = sector.outer.vertices[(i + 1) % sector.outer.vertices.size()];
+        if (on_segment(edge_a, edge_b, a) && on_segment(edge_a, edge_b, b)) {
+            return i < sector.wall_materials.size() ? sector.wall_materials[i] : undecedent::kDefaultMaterialId;
+        }
+        if (on_segment(a, b, edge_a) && on_segment(a, b, edge_b)) {
+            return i < sector.wall_materials.size() ? sector.wall_materials[i] : undecedent::kDefaultMaterialId;
+        }
+    }
+    return -1;
+}
+
+int hole_material_on_segment(const SectorPlane& sector, const Vec2 a, const Vec2 b) {
+    for (std::size_t hole_index = 0; hole_index < sector.holes.size(); ++hole_index) {
+        const PolygonLoop& hole = sector.holes[hole_index];
+        for (std::size_t edge_index = 0; edge_index < hole.vertices.size(); ++edge_index) {
+            const Vec2 edge_a = hole.vertices[edge_index];
+            const Vec2 edge_b = hole.vertices[(edge_index + 1) % hole.vertices.size()];
+            if (on_segment(edge_a, edge_b, a) && on_segment(edge_a, edge_b, b)) {
+                return hole_index < sector.hole_wall_materials.size() &&
+                        edge_index < sector.hole_wall_materials[hole_index].size()
+                    ? sector.hole_wall_materials[hole_index][edge_index]
+                    : undecedent::kDefaultMaterialId;
+            }
+        }
+    }
+    return -1;
+}
+
 } // namespace
 
 int main() {
@@ -177,6 +274,18 @@ int main() {
         expect_area("overlap", sectors, 150.0F);
         expect(has_neighbor(sectors), "overlap split should create neighbor edges");
         expect(materials_are_valid(sectors), "CSG add should keep material arrays valid");
+        int old_owned_faces = 0;
+        int new_owned_faces = 0;
+        for (const SectorPlane& sector : sectors) {
+            if (sector.floor_material == 3 && sector.ceiling_material == 4) {
+                ++old_owned_faces;
+            }
+            if (sector.floor_material == 0 && sector.ceiling_material == 0) {
+                ++new_owned_faces;
+            }
+        }
+        expect(old_owned_faces == 2, "overlap add should preserve existing floor and ceiling materials on old-owned faces");
+        expect(new_owned_faces == 1, "overlap add should leave new-only face materials at default");
     }
 
     {
@@ -190,10 +299,20 @@ int main() {
 
     {
         std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().wall_materials = {1, 2, 3, 4};
         sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
         expect(sectors.size() == 2, "edge-touching add should keep two sectors");
         expect_area("touching edge", sectors, 200.0F);
         expect(has_neighbor(sectors), "edge-touching sectors should become neighbors");
+        const SectorPlane& original = sector_at_point(sectors, Vec2{5, 5});
+        expect(outer_material_on_segment(original, Vec2{0, 0}, Vec2{10, 0}) == 1,
+            "adjacent add should preserve original bottom wall material");
+        expect(outer_material_on_segment(original, Vec2{10, 0}, Vec2{10, 10}) == 2,
+            "adjacent add should preserve original touched wall material");
+        expect(outer_material_on_segment(original, Vec2{10, 10}, Vec2{0, 10}) == 3,
+            "adjacent add should preserve original top wall material");
+        expect(outer_material_on_segment(original, Vec2{0, 10}, Vec2{0, 0}) == 4,
+            "adjacent add should preserve original left wall material");
     }
 
     {
@@ -269,6 +388,8 @@ int main() {
         sectors = subtract(std::move(sectors), loop({{-2, -2}, {2, -2}, {2, 2}, {-2, 2}}));
         expect(sectors.size() == 1 && sectors.front().holes.size() == 1,
             "test setup should create one sector with one contained hole");
+        sectors.front().wall_materials = {1, 2, 3, 4};
+        sectors.front().hole_wall_materials = {{5, 6, 7, 1}};
         sectors.front().outer.vertices[2] = Vec2{0, 12};
         const undecedent::CsgAddResult result = undecedent::csg_rebuild_sectors(sectors);
         expect(result.ok, "rebuild after outer vertex move with hole should succeed");
@@ -276,6 +397,10 @@ int main() {
         expect(result.sectors.front().holes.size() == 1, "rebuild after outer vertex move should preserve contained hole");
         expect_area("outer vertex move with hole rebuild", result.sectors, 204.0F);
         expect(materials_are_valid(result.sectors), "hole-preserving rebuild should keep material arrays valid");
+        expect(outer_material_on_segment(result.sectors.front(), Vec2{10, 0}, Vec2{0, 12}) == 2,
+            "rebuild should preserve remapped outer wall material");
+        expect(hole_material_on_segment(result.sectors.front(), Vec2{-2, -2}, Vec2{2, -2}) == 5,
+            "rebuild should preserve hole wall material");
     }
 
     {
@@ -287,8 +412,69 @@ int main() {
     }
 
     {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_material = 5;
+        sectors.front().ceiling_material = 6;
+        sectors.front().wall_materials = {1, 2, 3, 4};
+        sectors = knife(sectors, Vec2{5, -5}, Vec2{5, 15});
+        expect(sectors.size() == 2, "knife should split one rectangle into two sectors");
+        expect_area("knife split rectangle", sectors, 100.0F);
+        expect(has_neighbor(sectors), "knife split should create shared adjacency");
+        for (const SectorPlane& sector : sectors) {
+            expect(sector.floor_material == 5 && sector.ceiling_material == 6,
+                "knife split should preserve source floor and ceiling materials");
+        }
+        const SectorPlane& left = sector_at_point(sectors, Vec2{2, 5});
+        const SectorPlane& right = sector_at_point(sectors, Vec2{8, 5});
+        expect(outer_material_on_segment(left, Vec2{0, 0}, Vec2{5, 0}) == 1,
+            "knife split should preserve bottom wall material on split left sector");
+        expect(outer_material_on_segment(right, Vec2{5, 0}, Vec2{10, 0}) == 1,
+            "knife split should preserve bottom wall material on split right sector");
+        expect(outer_material_on_segment(left, Vec2{0, 10}, Vec2{5, 10}) == 3,
+            "knife split should preserve top wall material on split left sector");
+        expect(outer_material_on_segment(right, Vec2{5, 10}, Vec2{10, 10}) == 3,
+            "knife split should preserve top wall material on split right sector");
+    }
+
+    {
         std::vector<SectorPlane> sectors = add_at_floor({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}), 0.0F);
+        sectors.front().wall_materials = {1, 2, 3, 4};
+        sectors = add_at_floor(std::move(sectors), loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}), 96.0F);
+        for (SectorPlane& sector : sectors) {
+            if (std::abs(sector.floor_height - 96.0F) <= 0.001F) {
+                sector.wall_materials = {4, 3, 2, 1};
+            }
+        }
+        sectors = knife(sectors, Vec2{5, -5}, Vec2{5, 15}, 0.0F);
+        int lower_count = 0;
+        int upper_count = 0;
+        for (const SectorPlane& sector : sectors) {
+            if (std::abs(sector.floor_height) <= 0.001F) {
+                ++lower_count;
+            }
+            if (std::abs(sector.floor_height - 96.0F) <= 0.001F) {
+                ++upper_count;
+                expect(outer_material_on_segment(sector, Vec2{0, 0}, Vec2{10, 0}) == 4,
+                    "knife should leave inactive stacked floor wall materials unchanged");
+            }
+        }
+        expect(lower_count == 2, "knife should split only active floor sectors");
+        expect(upper_count == 1, "knife should preserve inactive stacked floor sector count");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add_at_floor({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}), 0.0F);
+        sectors.front().floor_material = 5;
+        sectors.front().ceiling_material = 6;
+        sectors.front().wall_materials = {1, 2, 3, 4};
         sectors = add_at_floor(std::move(sectors), loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}), 64.0F);
+        for (SectorPlane& sector : sectors) {
+            if (std::abs(sector.floor_height - 64.0F) <= 0.001F) {
+                sector.floor_material = 7;
+                sector.ceiling_material = 6;
+                sector.wall_materials = {4, 3, 2, 1};
+            }
+        }
         sectors = add_at_floor(std::move(sectors), loop({{5, 0}, {15, 0}, {15, 10}, {5, 10}}), 0.0F);
         expect(sectors.size() == 4, "active-floor add should split only sectors on the edited floor");
         expect_area("scoped floor add", sectors, 250.0F);
@@ -304,17 +490,39 @@ int main() {
         }
         expect(floor_zero_count == 3, "edited floor should contain the split sectors");
         expect(floor_sixty_four_count == 1, "inactive stacked floor should be preserved unchanged");
+        for (const SectorPlane& sector : sectors) {
+            if (std::abs(sector.floor_height - 64.0F) <= 0.001F) {
+                expect(sector.floor_material == 7 && sector.ceiling_material == 6,
+                    "scoped floor add should preserve inactive floor and ceiling materials");
+                expect(outer_material_on_segment(sector, Vec2{0, 0}, Vec2{10, 0}) == 4,
+                    "scoped floor add should preserve inactive wall materials");
+            }
+        }
     }
 
     {
         std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
         sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sector_at_point(sectors, Vec2{5, 5}).floor_material = 6;
+        sector_at_point(sectors, Vec2{5, 5}).ceiling_material = 7;
+        sector_at_point(sectors, Vec2{5, 5}).wall_materials = {1, 2, 3, 4};
+        sector_at_point(sectors, Vec2{15, 5}).wall_materials = {1, 5, 3, 2};
         sectors = merge(sectors, {0, 1});
         expect(sectors.size() == 1, "adjacent merge should produce one sector");
         expect(sectors.front().holes.empty(), "adjacent merge should not create holes");
         expect(sectors.front().outer.vertices.size() == 4, "adjacent rectangles should merge into one rectangle");
         expect_area("adjacent merge", sectors, 200.0F);
         expect(materials_are_valid(sectors), "CSG merge should keep material arrays valid");
+        expect(sectors.front().floor_material == 6, "merge should preserve primary floor material");
+        expect(sectors.front().ceiling_material == 7, "merge should preserve primary ceiling material");
+        expect(outer_material_on_segment(sectors.front(), Vec2{0, 0}, Vec2{20, 0}) == 1,
+            "merge should preserve compatible bottom wall material");
+        expect(outer_material_on_segment(sectors.front(), Vec2{20, 0}, Vec2{20, 10}) == 5,
+            "merge should preserve right exterior wall material");
+        expect(outer_material_on_segment(sectors.front(), Vec2{20, 10}, Vec2{0, 10}) == 3,
+            "merge should preserve compatible top wall material");
+        expect(outer_material_on_segment(sectors.front(), Vec2{0, 10}, Vec2{0, 0}) == 4,
+            "merge should preserve left exterior wall material");
     }
 
     {

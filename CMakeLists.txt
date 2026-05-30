@@ -23,12 +23,21 @@ find_package(OpenGL REQUIRED)
 add_executable(Undecedent
     main.cpp
     src/csg.cpp
+    src/debug_draw.cpp
     src/deferred_renderer.cpp
+    src/editor.cpp
+    src/editor_render.cpp
+    src/editor_ui.cpp
+    src/game_control.cpp
     src/map_io.cpp
     src/materials.cpp
     src/math3d.cpp
     src/physics.cpp
     src/runtime_geometry.cpp
+    src/runtime_render_cache.cpp
+    src/runtime_render.cpp
+    src/runtime_pick.cpp
+    src/runtime_visibility.cpp
     src/runtime_world.cpp
     src/screen_draw.cpp
     src/sdl_platform.cpp
@@ -80,11 +89,12 @@ target_include_directories(UndecedentRuntimeGeometryTests PRIVATE include)
 add_executable(UndecedentRuntimeWorldTests
     tests/runtime_world_tests.cpp
     src/csg.cpp
+    src/runtime_visibility.cpp
     src/runtime_world.cpp
     src/triangulator.cpp
 )
 
-target_include_directories(UndecedentRuntimeWorldTests PRIVATE include)
+target_include_directories(UndecedentRuntimeWorldTests PRIVATE include glad/include)
 
 add_executable(UndecedentPhysicsTests
     tests/physics_tests.cpp
