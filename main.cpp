@@ -19,19 +19,32 @@
 #include <SDL3/SDL_dialog.h>
 
 #include "undecedent/csg.hpp"
+#include "undecedent/deferred_renderer.hpp"
 #include "undecedent/editor_slice.hpp"
 #include "undecedent/map_io.hpp"
+#include "undecedent/math3d.hpp"
+#include "undecedent/materials.hpp"
 #include "undecedent/physics.hpp"
 #include "undecedent/runtime_geometry.hpp"
 #include "undecedent/runtime_world.hpp"
+#include "undecedent/screen_draw.hpp"
+#include "undecedent/sdl_platform.hpp"
 #include "undecedent/triangulator.hpp"
 
 namespace {
-struct MaterialColor {
-    float r = 1.0F;
-    float g = 1.0F;
-    float b = 1.0F;
-};
+using undecedent::draw_screen_line;
+using undecedent::draw_screen_quad;
+using undecedent::screen_to_ndc_x;
+using undecedent::screen_to_ndc_y;
+using undecedent::configure_gl_attributes;
+using undecedent::log_sdl_error;
+using undecedent::toggle_exclusive_fullscreen;
+using undecedent::add_vec3;
+using undecedent::cross_vec3;
+using undecedent::dot_vec3;
+using undecedent::mul_vec3;
+using undecedent::normalize_vec3;
+using undecedent::ray_triangle_intersection;
 
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
@@ -70,17 +83,6 @@ constexpr float kFpsCounterUpdateSeconds = 0.25F;
 constexpr std::size_t kEditorHistoryLimit = 128;
 constexpr float kPi = 3.14159265358979323846F;
 
-const std::array<MaterialColor, undecedent::kMaterialCount> kMaterialPalette{{
-    {0.24F, 0.58F, 0.52F},
-    {0.78F, 0.36F, 0.32F},
-    {0.35F, 0.58F, 0.90F},
-    {0.88F, 0.72F, 0.30F},
-    {0.58F, 0.42F, 0.78F},
-    {0.36F, 0.72F, 0.40F},
-    {0.82F, 0.82F, 0.78F},
-    {0.16F, 0.18F, 0.22F},
-}};
-
 struct EditorCamera {
     float x = 0.0F;
     float y = 0.0F;
@@ -105,14 +107,6 @@ struct PlaytestPlayerState {
     bool jump_was_down = false;
 };
 
-struct FullscreenState {
-    bool exclusive = false;
-    int windowed_x = SDL_WINDOWPOS_UNDEFINED;
-    int windowed_y = SDL_WINDOWPOS_UNDEFINED;
-    int windowed_w = kWindowWidth;
-    int windowed_h = kWindowHeight;
-};
-
 struct RuntimeRenderVertex {
     float x = 0.0F;
     float y = 0.0F;
@@ -134,20 +128,6 @@ struct RuntimeRenderCache {
     GLuint vertex_buffer = 0;
     GLsizei total_vertices = 0;
     std::vector<RuntimeRenderRange> sector_ranges;
-};
-
-struct DeferredRenderer {
-    GLuint framebuffer = 0;
-    GLuint position_texture = 0;
-    GLuint normal_texture = 0;
-    GLuint albedo_texture = 0;
-    GLuint depth_renderbuffer = 0;
-    GLuint geometry_program = 0;
-    GLuint lighting_program = 0;
-    int width = 0;
-    int height = 0;
-    bool initialized = false;
-    bool disabled = false;
 };
 
 struct ProfilerDisplay {
@@ -277,16 +257,6 @@ void set_game_projection(int width, int height, const GameCamera& camera);
 void push_undo_snapshot(EditorWorld& editor_world, const char* label);
 void push_undo_snapshot(EditorWorld& editor_world, EditorHistorySnapshot snapshot, const char* label);
 
-bool configure_gl_attributes() {
-    bool ok = true;
-    ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4) && ok;
-    ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3) && ok;
-    ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY) && ok;
-    ok = SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1) && ok;
-    ok = SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24) && ok;
-    return ok;
-}
-
 double ticks_to_ms(const Uint64 start, const Uint64 end) {
     return static_cast<double>(end - start) / 1'000'000.0;
 }
@@ -301,113 +271,6 @@ std::string format_fps(const double fps) {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(fps >= 1000.0 ? 0 : 1) << fps;
     return stream.str();
-}
-
-std::string format_display_mode(const SDL_DisplayMode& mode) {
-    std::ostringstream stream;
-    stream << mode.w << 'x' << mode.h;
-    if (mode.refresh_rate > 0.0F) {
-        stream << '@' << std::fixed << std::setprecision(2) << mode.refresh_rate << "Hz";
-    }
-    return stream.str();
-}
-
-void log_sdl_error(const char* action) {
-    std::cerr << action << ": " << SDL_GetError() << '\n';
-}
-
-bool enter_exclusive_fullscreen(SDL_Window* window, FullscreenState& fullscreen_state) {
-    if (fullscreen_state.exclusive) {
-        return true;
-    }
-
-    SDL_GetWindowPosition(window, &fullscreen_state.windowed_x, &fullscreen_state.windowed_y);
-    SDL_GetWindowSize(window, &fullscreen_state.windowed_w, &fullscreen_state.windowed_h);
-
-    const SDL_DisplayID display_id = SDL_GetDisplayForWindow(window);
-    if (display_id == 0) {
-        log_sdl_error("SDL_GetDisplayForWindow failed");
-        return false;
-    }
-
-    const SDL_DisplayMode* desktop_mode = SDL_GetDesktopDisplayMode(display_id);
-    if (desktop_mode == nullptr) {
-        log_sdl_error("SDL_GetDesktopDisplayMode failed");
-        return false;
-    }
-
-    SDL_DisplayMode fullscreen_mode{};
-    if (!SDL_GetClosestFullscreenDisplayMode(
-            display_id,
-            desktop_mode->w,
-            desktop_mode->h,
-            desktop_mode->refresh_rate,
-            true,
-            &fullscreen_mode
-        )) {
-        log_sdl_error("SDL_GetClosestFullscreenDisplayMode failed");
-        return false;
-    }
-
-    if (!SDL_SetWindowFullscreenMode(window, &fullscreen_mode)) {
-        log_sdl_error("SDL_SetWindowFullscreenMode failed");
-        return false;
-    }
-
-    if (!SDL_SetWindowFullscreen(window, true)) {
-        log_sdl_error("SDL_SetWindowFullscreen failed");
-        SDL_SetWindowFullscreenMode(window, nullptr);
-        return false;
-    }
-
-    if (!SDL_SyncWindow(window)) {
-        log_sdl_error("SDL_SyncWindow after fullscreen enter failed");
-        SDL_SetWindowFullscreen(window, false);
-        SDL_SetWindowFullscreenMode(window, nullptr);
-        return false;
-    }
-
-    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0) {
-        std::cerr << "Exclusive fullscreen request was accepted but the window did not enter fullscreen\n";
-        SDL_SetWindowFullscreenMode(window, nullptr);
-        return false;
-    }
-
-    fullscreen_state.exclusive = true;
-    std::cout << "Exclusive fullscreen enabled: " << format_display_mode(fullscreen_mode) << '\n';
-    return true;
-}
-
-void exit_exclusive_fullscreen(SDL_Window* window, FullscreenState& fullscreen_state) {
-    if (!fullscreen_state.exclusive) {
-        return;
-    }
-
-    if (!SDL_SetWindowFullscreen(window, false)) {
-        log_sdl_error("SDL_SetWindowFullscreen(false) failed");
-        return;
-    }
-
-    if (!SDL_SyncWindow(window)) {
-        log_sdl_error("SDL_SyncWindow after fullscreen exit failed");
-    }
-
-    if (!SDL_SetWindowFullscreenMode(window, nullptr)) {
-        log_sdl_error("SDL_SetWindowFullscreenMode(nullptr) failed");
-    }
-
-    SDL_SetWindowSize(window, fullscreen_state.windowed_w, fullscreen_state.windowed_h);
-    SDL_SetWindowPosition(window, fullscreen_state.windowed_x, fullscreen_state.windowed_y);
-    fullscreen_state.exclusive = false;
-    std::cout << "Exclusive fullscreen disabled\n";
-}
-
-void toggle_exclusive_fullscreen(SDL_Window* window, FullscreenState& fullscreen_state) {
-    if (fullscreen_state.exclusive) {
-        exit_exclusive_fullscreen(window, fullscreen_state);
-    } else {
-        enter_exclusive_fullscreen(window, fullscreen_state);
-    }
 }
 
 void queue_dialog_message(MapDialogRequests& requests, std::string message) {
@@ -503,40 +366,6 @@ void print_benchmark_report(
         << std::endl;
 }
 
-float screen_to_ndc_x(const float screen_x, const int width) {
-    return (2.0F * screen_x / static_cast<float>(width)) - 1.0F;
-}
-
-float screen_to_ndc_y(const float screen_y, const int height) {
-    return 1.0F - (2.0F * screen_y / static_cast<float>(height));
-}
-
-void draw_screen_line(
-    const float x0,
-    const float y0,
-    const float x1,
-    const float y1,
-    const int width,
-    const int height
-) {
-    glVertex2f(screen_to_ndc_x(x0, width), screen_to_ndc_y(y0, height));
-    glVertex2f(screen_to_ndc_x(x1, width), screen_to_ndc_y(y1, height));
-}
-
-void draw_screen_quad(
-    const float x,
-    const float y,
-    const float quad_width,
-    const float quad_height,
-    const int width,
-    const int height
-) {
-    glVertex2f(screen_to_ndc_x(x, width), screen_to_ndc_y(y, height));
-    glVertex2f(screen_to_ndc_x(x + quad_width, width), screen_to_ndc_y(y, height));
-    glVertex2f(screen_to_ndc_x(x + quad_width, width), screen_to_ndc_y(y + quad_height, height));
-    glVertex2f(screen_to_ndc_x(x, width), screen_to_ndc_y(y + quad_height, height));
-}
-
 float screen_to_world_x(const float screen_x, const int width, const EditorCamera& camera) {
     const float center_x = static_cast<float>(width) * 0.5F;
     return ((screen_x - center_x) / camera.zoom) + camera.x;
@@ -629,10 +458,6 @@ bool same_editor_point(const undecedent::Vec2 a, const undecedent::Vec2 b) {
     return distance_squared(a, b) <= (undecedent::kGeometryEpsilon * undecedent::kGeometryEpsilon);
 }
 
-MaterialColor material_color(const int material_id) {
-    return kMaterialPalette[static_cast<std::size_t>(undecedent::clamped_material_id(material_id))];
-}
-
 void append_runtime_vertex(
     std::vector<RuntimeRenderVertex>& vertices,
     const undecedent::Vec3 point,
@@ -676,7 +501,7 @@ void append_runtime_triangle(
     const undecedent::RuntimeTaggedTriangle& tagged_triangle
 ) {
     const undecedent::RuntimeTriangle& triangle = tagged_triangle.triangle;
-    const MaterialColor color = material_color(tagged_triangle.material_id);
+    const undecedent::MaterialColor color = undecedent::material_color(tagged_triangle.material_id);
     const undecedent::Vec3 normal = runtime_triangle_lighting_normal(triangle);
     append_runtime_vertex(vertices, triangle.a, color.r, color.g, color.b, normal);
     append_runtime_vertex(vertices, triangle.b, color.r, color.g, color.b, normal);
@@ -720,286 +545,6 @@ void destroy_runtime_render_cache(RuntimeRenderCache& render_cache) {
         glDeleteBuffers(1, &render_cache.vertex_buffer);
     }
     render_cache = {};
-}
-
-void destroy_deferred_renderer(DeferredRenderer& renderer) {
-    if (renderer.position_texture != 0) {
-        glDeleteTextures(1, &renderer.position_texture);
-    }
-    if (renderer.normal_texture != 0) {
-        glDeleteTextures(1, &renderer.normal_texture);
-    }
-    if (renderer.albedo_texture != 0) {
-        glDeleteTextures(1, &renderer.albedo_texture);
-    }
-    if (renderer.depth_renderbuffer != 0) {
-        glDeleteRenderbuffers(1, &renderer.depth_renderbuffer);
-    }
-    if (renderer.framebuffer != 0) {
-        glDeleteFramebuffers(1, &renderer.framebuffer);
-    }
-    if (renderer.geometry_program != 0) {
-        glDeleteProgram(renderer.geometry_program);
-    }
-    if (renderer.lighting_program != 0) {
-        glDeleteProgram(renderer.lighting_program);
-    }
-    renderer = {};
-}
-
-std::string shader_info_log(const GLuint object, const bool program) {
-    GLint length = 0;
-    if (program) {
-        glGetProgramiv(object, GL_INFO_LOG_LENGTH, &length);
-    } else {
-        glGetShaderiv(object, GL_INFO_LOG_LENGTH, &length);
-    }
-    if (length <= 1) {
-        return {};
-    }
-
-    std::string log(static_cast<std::size_t>(length), '\0');
-    GLsizei written = 0;
-    if (program) {
-        glGetProgramInfoLog(object, length, &written, log.data());
-    } else {
-        glGetShaderInfoLog(object, length, &written, log.data());
-    }
-    log.resize(static_cast<std::size_t>(written));
-    return log;
-}
-
-GLuint compile_shader(const GLenum type, const char* source, const char* label) {
-    const GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint compiled = GL_FALSE;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
-    if (compiled != GL_TRUE) {
-        std::cerr << "Deferred shader compile failed (" << label << "): "
-                  << shader_info_log(shader, false) << '\n';
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
-
-GLuint create_shader_program(
-    const char* vertex_source,
-    const char* fragment_source,
-    const char* label,
-    const bool bind_runtime_attributes
-) {
-    const GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER, vertex_source, label);
-    if (vertex_shader == 0) {
-        return 0;
-    }
-    const GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, fragment_source, label);
-    if (fragment_shader == 0) {
-        glDeleteShader(vertex_shader);
-        return 0;
-    }
-
-    const GLuint program = glCreateProgram();
-    glAttachShader(program, vertex_shader);
-    glAttachShader(program, fragment_shader);
-    if (bind_runtime_attributes) {
-        glBindAttribLocation(program, 0, "aPosition");
-        glBindAttribLocation(program, 1, "aColor");
-        glBindAttribLocation(program, 2, "aNormal");
-    }
-    glLinkProgram(program);
-    glDeleteShader(vertex_shader);
-    glDeleteShader(fragment_shader);
-
-    GLint linked = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    if (linked != GL_TRUE) {
-        std::cerr << "Deferred shader link failed (" << label << "): "
-                  << shader_info_log(program, true) << '\n';
-        glDeleteProgram(program);
-        return 0;
-    }
-    return program;
-}
-
-GLuint create_gbuffer_texture(
-    const int width,
-    const int height,
-    const GLint internal_format,
-    const GLenum format,
-    const GLenum type
-) {
-    GLuint texture = 0;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, format, type, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return texture;
-}
-
-bool create_deferred_programs(DeferredRenderer& renderer) {
-    static constexpr const char* geometry_vertex = R"(
-#version 120
-attribute vec3 aPosition;
-attribute vec3 aColor;
-attribute vec3 aNormal;
-varying vec3 vWorldPosition;
-varying vec3 vNormal;
-varying vec3 vAlbedo;
-void main() {
-    vWorldPosition = aPosition;
-    vNormal = normalize(aNormal);
-    vAlbedo = aColor;
-    gl_Position = gl_ModelViewProjectionMatrix * vec4(aPosition, 1.0);
-}
-)";
-
-    static constexpr const char* geometry_fragment = R"(
-#version 120
-varying vec3 vWorldPosition;
-varying vec3 vNormal;
-varying vec3 vAlbedo;
-void main() {
-    gl_FragData[0] = vec4(vWorldPosition, 1.0);
-    gl_FragData[1] = vec4((normalize(vNormal) * 0.5) + 0.5, 1.0);
-    gl_FragData[2] = vec4(vAlbedo, 1.0);
-}
-)";
-
-    static constexpr const char* lighting_vertex = R"(
-#version 120
-void main() {
-    gl_Position = gl_Vertex;
-}
-)";
-
-    static constexpr const char* lighting_fragment = R"(
-#version 120
-uniform sampler2D uPosition;
-uniform sampler2D uNormal;
-uniform sampler2D uAlbedo;
-uniform vec2 uInvViewport;
-uniform vec3 uCameraPosition;
-uniform vec3 uAmbientColor;
-uniform int uLightCount;
-uniform vec3 uLightPositions[32];
-uniform vec3 uLightColors[32];
-uniform float uLightRadii[32];
-uniform float uLightIntensities[32];
-void main() {
-    vec2 uv = gl_FragCoord.xy * uInvViewport;
-    vec3 world_position = texture2D(uPosition, uv).xyz;
-    vec3 encoded_normal = texture2D(uNormal, uv).xyz;
-    vec3 albedo = texture2D(uAlbedo, uv).xyz;
-    if (dot(albedo, albedo) <= 0.000001) {
-        gl_FragColor = vec4(0.02, 0.025, 0.03, 1.0);
-        return;
-    }
-
-    vec3 normal = normalize((encoded_normal * 2.0) - 1.0);
-    vec3 view_dir = normalize(uCameraPosition - world_position);
-    vec3 color = albedo * uAmbientColor;
-    for (int i = 0; i < 32; ++i) {
-        if (i >= uLightCount) {
-            break;
-        }
-        vec3 light_vector = uLightPositions[i] - world_position;
-        float light_distance = length(light_vector);
-        vec3 light_dir = light_distance > 0.0001 ? light_vector / light_distance : vec3(0.0, 1.0, 0.0);
-        vec3 half_dir = normalize(light_dir + view_dir);
-        float diffuse = max(dot(normal, light_dir), 0.0);
-        float specular = pow(max(dot(normal, half_dir), 0.0), 32.0);
-        float range = max(uLightRadii[i], 1.0);
-        float attenuation = clamp(1.0 - (light_distance / range), 0.0, 1.0);
-        attenuation *= attenuation;
-        color += ((albedo * diffuse) + (vec3(specular) * 0.35)) *
-            uLightColors[i] * attenuation * uLightIntensities[i];
-    }
-    gl_FragColor = vec4(color, 1.0);
-}
-)";
-
-    renderer.geometry_program = create_shader_program(
-        geometry_vertex,
-        geometry_fragment,
-        "deferred geometry",
-        true
-    );
-    if (renderer.geometry_program == 0) {
-        return false;
-    }
-    renderer.lighting_program = create_shader_program(
-        lighting_vertex,
-        lighting_fragment,
-        "deferred lighting",
-        false
-    );
-    return renderer.lighting_program != 0;
-}
-
-bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const int height) {
-    if (renderer.disabled || width <= 0 || height <= 0) {
-        return false;
-    }
-
-    if (!renderer.initialized) {
-        if (!create_deferred_programs(renderer)) {
-            destroy_deferred_renderer(renderer);
-            renderer.disabled = true;
-            return false;
-        }
-        glGenFramebuffers(1, &renderer.framebuffer);
-        glGenRenderbuffers(1, &renderer.depth_renderbuffer);
-        renderer.initialized = true;
-    }
-
-    if (renderer.width == width && renderer.height == height &&
-        renderer.position_texture != 0 && renderer.normal_texture != 0 && renderer.albedo_texture != 0) {
-        return true;
-    }
-
-    renderer.width = width;
-    renderer.height = height;
-    if (renderer.position_texture != 0) {
-        glDeleteTextures(1, &renderer.position_texture);
-    }
-    if (renderer.normal_texture != 0) {
-        glDeleteTextures(1, &renderer.normal_texture);
-    }
-    if (renderer.albedo_texture != 0) {
-        glDeleteTextures(1, &renderer.albedo_texture);
-    }
-
-    renderer.position_texture = create_gbuffer_texture(width, height, GL_RGB16F, GL_RGB, GL_FLOAT);
-    renderer.normal_texture = create_gbuffer_texture(width, height, GL_RGB16F, GL_RGB, GL_FLOAT);
-    renderer.albedo_texture = create_gbuffer_texture(width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
-
-    glBindRenderbuffer(GL_RENDERBUFFER, renderer.depth_renderbuffer);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, renderer.framebuffer);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, renderer.position_texture, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, renderer.normal_texture, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, renderer.albedo_texture, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, renderer.depth_renderbuffer);
-    const GLenum draw_buffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
-    glDrawBuffers(3, draw_buffers);
-    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (status != GL_FRAMEBUFFER_COMPLETE) {
-        std::cerr << "Deferred framebuffer incomplete: 0x" << std::hex << status << std::dec << '\n';
-        renderer.disabled = true;
-        return false;
-    }
-
-    return true;
 }
 
 bool is_sector_selected(const EditorWorld& editor_world, const int sector_index) {
@@ -2357,7 +1902,7 @@ void draw_material_selector(const int active_material, const int width, const in
     glColor4f(0.0F, 0.0F, 0.0F, 0.40F);
     draw_screen_quad(10.0F, y - 8.0F, box_width, swatch + 22.0F, width, height);
     for (int i = 0; i < undecedent::kMaterialCount; ++i) {
-        const MaterialColor color = material_color(i);
+        const undecedent::MaterialColor color = undecedent::material_color(i);
         glColor4f(color.r, color.g, color.b, 0.94F);
         draw_screen_quad(x + (static_cast<float>(i) * (swatch + gap)), y, swatch, swatch, width, height);
     }
@@ -2665,74 +2210,6 @@ void update_playtest_camera(
         }
         playtest_state.vertical_velocity = 0.0F;
     }
-}
-
-undecedent::Vec3 add_vec3(const undecedent::Vec3 a, const undecedent::Vec3 b) {
-    return undecedent::Vec3{a.x + b.x, a.y + b.y, a.z + b.z};
-}
-
-undecedent::Vec3 sub_vec3(const undecedent::Vec3 a, const undecedent::Vec3 b) {
-    return undecedent::Vec3{a.x - b.x, a.y - b.y, a.z - b.z};
-}
-
-undecedent::Vec3 mul_vec3(const undecedent::Vec3 a, const float value) {
-    return undecedent::Vec3{a.x * value, a.y * value, a.z * value};
-}
-
-float dot_vec3(const undecedent::Vec3 a, const undecedent::Vec3 b) {
-    return (a.x * b.x) + (a.y * b.y) + (a.z * b.z);
-}
-
-undecedent::Vec3 cross_vec3(const undecedent::Vec3 a, const undecedent::Vec3 b) {
-    return undecedent::Vec3{
-        (a.y * b.z) - (a.z * b.y),
-        (a.z * b.x) - (a.x * b.z),
-        (a.x * b.y) - (a.y * b.x),
-    };
-}
-
-undecedent::Vec3 normalize_vec3(const undecedent::Vec3 value) {
-    const float length = std::sqrt(dot_vec3(value, value));
-    if (length <= 0.00001F) {
-        return undecedent::Vec3{};
-    }
-    return mul_vec3(value, 1.0F / length);
-}
-
-bool ray_triangle_intersection(
-    const undecedent::Vec3 origin,
-    const undecedent::Vec3 direction,
-    const undecedent::RuntimeTriangle& triangle,
-    float& out_t
-) {
-    constexpr float epsilon = 0.00001F;
-    const undecedent::Vec3 edge1 = sub_vec3(triangle.b, triangle.a);
-    const undecedent::Vec3 edge2 = sub_vec3(triangle.c, triangle.a);
-    const undecedent::Vec3 h = cross_vec3(direction, edge2);
-    const float det = dot_vec3(edge1, h);
-    if (det > -epsilon && det < epsilon) {
-        return false;
-    }
-
-    const float inv_det = 1.0F / det;
-    const undecedent::Vec3 s = sub_vec3(origin, triangle.a);
-    const float u = inv_det * dot_vec3(s, h);
-    if (u < 0.0F || u > 1.0F) {
-        return false;
-    }
-
-    const undecedent::Vec3 q = cross_vec3(s, edge1);
-    const float v = inv_det * dot_vec3(direction, q);
-    if (v < 0.0F || u + v > 1.0F) {
-        return false;
-    }
-
-    const float t = inv_det * dot_vec3(edge2, q);
-    if (t <= epsilon) {
-        return false;
-    }
-    out_t = t;
-    return true;
 }
 
 undecedent::Vec3 camera_forward(const GameCamera& camera) {
@@ -3370,7 +2847,7 @@ int draw_runtime_world(
 }
 
 int draw_deferred_runtime_world(
-    DeferredRenderer& renderer,
+    undecedent::DeferredRenderer& renderer,
     const undecedent::RuntimeWorld& world,
     const RuntimeRenderCache& render_cache,
     const std::vector<undecedent::PointLight>& point_lights,
@@ -3379,7 +2856,7 @@ int draw_deferred_runtime_world(
     const GameCamera& camera,
     const bool draw_wire_overlay
 ) {
-    if (!ensure_deferred_renderer(renderer, width, height) ||
+    if (!undecedent::ensure_deferred_renderer(renderer, width, height) ||
         render_cache.vertex_buffer == 0 || render_cache.total_vertices <= 0) {
         return draw_runtime_world(world, render_cache, width, height, camera, draw_wire_overlay, true);
     }
@@ -3648,13 +3125,13 @@ int main() {
     ProfilerAccumulator profiler_accumulator{};
     BenchmarkAccumulator benchmark_accumulator{};
     ProfilerDisplay displayed_profiler{};
-    FullscreenState fullscreen_state{};
+    undecedent::FullscreenState fullscreen_state{};
     MapDialogRequests map_dialog_requests{};
     EditorCamera editor_camera{};
     GameCamera game_camera{};
     PlaytestPlayerState playtest_state{};
     EditorWorld editor_world{};
-    DeferredRenderer deferred_renderer{};
+    undecedent::DeferredRenderer deferred_renderer{};
     int active_material = undecedent::kDefaultMaterialId;
     set_app_mode(window, app_mode);
     Uint64 previous_ticks = SDL_GetTicksNS();
@@ -4341,7 +3818,7 @@ int main() {
     }
 
     destroy_runtime_render_cache(editor_world.runtime_render_cache);
-    destroy_deferred_renderer(deferred_renderer);
+    undecedent::destroy_deferred_renderer(deferred_renderer);
     SDL_GL_DestroyContext(gl_context);
     SDL_DestroyWindow(window);
     SDL_Quit();

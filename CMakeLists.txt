@@ -23,10 +23,15 @@ find_package(OpenGL REQUIRED)
 add_executable(Undecedent
     main.cpp
     src/csg.cpp
+    src/deferred_renderer.cpp
     src/map_io.cpp
+    src/materials.cpp
+    src/math3d.cpp
     src/physics.cpp
     src/runtime_geometry.cpp
     src/runtime_world.cpp
+    src/screen_draw.cpp
+    src/sdl_platform.cpp
     src/triangulator.cpp
     glad/src/glad.c
 )
