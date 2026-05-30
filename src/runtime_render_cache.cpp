@@ -88,12 +88,23 @@ Vec3 runtime_triangle_area_normal(const RuntimeTriangle& triangle) {
 void append_runtime_vertex(
     std::vector<RuntimeRenderVertex>& vertices,
     const Vec3 point,
-    const float r,
-    const float g,
-    const float b,
+    const MaterialProperties material,
     const Vec3 normal
 ) {
-    vertices.push_back(RuntimeRenderVertex{point.x, point.y, point.z, r, g, b, normal.x, normal.y, normal.z});
+    vertices.push_back(RuntimeRenderVertex{
+        point.x,
+        point.y,
+        point.z,
+        material.base_color.r,
+        material.base_color.g,
+        material.base_color.b,
+        normal.x,
+        normal.y,
+        normal.z,
+        material.roughness,
+        material.metallic,
+        material.specular,
+    });
 }
 
 void append_runtime_triangle(
@@ -102,7 +113,7 @@ void append_runtime_triangle(
     const std::map<SmoothNormalKey, Vec3>& smooth_normals
 ) {
     const RuntimeTriangle& triangle = tagged_triangle.triangle;
-    const MaterialColor color = material_color(tagged_triangle.material_id);
+    const MaterialProperties material = material_properties(tagged_triangle.material_id);
     const Vec3 face_normal = runtime_triangle_lighting_normal(triangle);
     const auto vertex_normal = [&](const Vec3 point) {
         if (!uses_smooth_normals(tagged_triangle)) {
@@ -111,9 +122,9 @@ void append_runtime_triangle(
         const auto found = smooth_normals.find(smooth_normal_key(tagged_triangle, point));
         return found == smooth_normals.end() ? face_normal : found->second;
     };
-    append_runtime_vertex(vertices, triangle.a, color.r, color.g, color.b, vertex_normal(triangle.a));
-    append_runtime_vertex(vertices, triangle.b, color.r, color.g, color.b, vertex_normal(triangle.b));
-    append_runtime_vertex(vertices, triangle.c, color.r, color.g, color.b, vertex_normal(triangle.c));
+    append_runtime_vertex(vertices, triangle.a, material, vertex_normal(triangle.a));
+    append_runtime_vertex(vertices, triangle.b, material, vertex_normal(triangle.b));
+    append_runtime_vertex(vertices, triangle.c, material, vertex_normal(triangle.c));
 }
 
 std::map<SmoothNormalKey, Vec3> build_smooth_normals(const RuntimeWorld& world) {

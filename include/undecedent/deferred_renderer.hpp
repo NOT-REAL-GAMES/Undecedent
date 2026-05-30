@@ -9,6 +9,7 @@ struct DeferredRenderer {
     GLuint position_texture = 0;
     GLuint normal_texture = 0;
     GLuint albedo_texture = 0;
+    GLuint material_texture = 0;
     GLuint depth_renderbuffer = 0;
     GLuint geometry_program = 0;
     GLuint lighting_program = 0;

@@ -827,6 +827,7 @@ CsgAddResult run_csg(
             SectorPlane sector;
             sector.outer = loop;
             if (const SectorPlane* source = source_sector_for_point(existing_sectors, sample)) {
+                sector.id = source->id;
                 sector.floor_height = source->floor_height;
                 sector.height = source->height;
                 sector.floor_material = source->floor_material;
@@ -1132,6 +1133,7 @@ CsgAddResult merge_selected_sectors(
     }
 
     SectorPlane merged;
+    merged.id = sectors[static_cast<std::size_t>(selected.front())].id;
     merged.floor_height = sectors[static_cast<std::size_t>(selected.front())].floor_height;
     merged.height = sectors[static_cast<std::size_t>(selected.front())].height;
     merged.floor_material = selected_sources.front().floor_material;

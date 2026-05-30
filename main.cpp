@@ -49,6 +49,7 @@ using undecedent::draw_stroke_text;
 using undecedent::draw_entity_dropdown;
 using undecedent::draw_material_selector;
 using undecedent::draw_sculpt_button;
+using undecedent::draw_subdivision_controls;
 using undecedent::screen_to_ndc_x;
 using undecedent::screen_to_ndc_y;
 using undecedent::configure_gl_attributes;
@@ -79,11 +80,13 @@ using undecedent::EditorWorld;
 using undecedent::EntityPlacementType;
 using undecedent::finish_committed_vertex_drag;
 using undecedent::format_world_units;
+using undecedent::editor_scroll_zoom_delta;
 using undecedent::GameCamera;
 using undecedent::GameControlConfig;
 using undecedent::GameRenderConfig;
 using undecedent::handle_entity_dropdown_click;
 using undecedent::handle_sculpt_button_click;
+using undecedent::handle_subdivision_controls_click;
 using undecedent::is_dragged_committed_ref;
 using undecedent::is_sector_selected;
 using undecedent::matching_committed_vertices;
@@ -412,13 +415,18 @@ void process_pending_map_dialogs(
 
     if (!save_path_string.empty()) {
         const std::filesystem::path save_path = normalize_save_map_path(save_path_string);
+        undecedent::ensure_editor_stable_ids(editor_world);
         const undecedent::SaveMapResult result =
-            undecedent::save_map_file(
+            undecedent::save_map_file_dirty(
                 editor_world.sectors,
                 editor_world.player_spawn,
                 editor_world.point_lights,
+                undecedent::editor_map_dirty_state(editor_world),
                 save_path
             );
+        if (result.ok) {
+            undecedent::clear_map_dirty_state(editor_world);
+        }
         std::cout << result.message << '\n';
     }
 
@@ -437,6 +445,7 @@ void process_pending_map_dialogs(
         editor_world.point_lights = result.point_lights;
         clear_sector_selection(editor_world);
         rebuild_runtime_geometry(editor_world);
+        undecedent::clear_map_dirty_state(editor_world);
         if (!editor_enabled) {
             spawn_playtest_camera(editor_world, game_camera);
             reset_playtest_player_state(playtest_state, editor_world.runtime_world, game_camera);
@@ -835,11 +844,11 @@ int main() {
                 }
 
                 if (editor_3d && !event.key.repeat && editor_world.displacement_sculpt_enabled) {
-                    if (key == SDLK_LEFTBRACKET || scancode == SDL_SCANCODE_LEFTBRACKET) {
+                    if (key == SDLK_COMMA || scancode == SDL_SCANCODE_COMMA) {
                         adjust_displacement_brush_radius(editor_world, -8.0F);
                         continue;
                     }
-                    if (key == SDLK_RIGHTBRACKET || scancode == SDL_SCANCODE_RIGHTBRACKET) {
+                    if (key == SDLK_PERIOD || scancode == SDL_SCANCODE_PERIOD) {
                         adjust_displacement_brush_radius(editor_world, 8.0F);
                         continue;
                     }
@@ -957,6 +966,9 @@ int main() {
                 int width = 0;
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
+                if (handle_subdivision_controls_click(editor_world, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
                 if (handle_sculpt_button_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
@@ -970,6 +982,9 @@ int main() {
                 int width = 0;
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
+                if (handle_subdivision_controls_click(editor_world, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
                 if (handle_sculpt_button_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
@@ -1058,7 +1073,11 @@ int main() {
                     game_render_config
                 );
                 const bool shift_down = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
-                const float delta = scroll_y * (shift_down ? 1.0F : kSectorHeightStep);
+                const float eased_scroll = editor_scroll_zoom_delta(scroll_y);
+                if (eased_scroll == 0.0F) {
+                    continue;
+                }
+                const float delta = eased_scroll * (shift_down ? 1.0F : kSectorHeightStep);
                 if (sculpt_displacement_at_pick(editor_world, pick, delta)) {
                     std::cout << "Sculpted displacement at sector " << pick.sector_id << '\n';
                 }
@@ -1386,6 +1405,7 @@ int main() {
             float mouse_x = 0.0F;
             float mouse_y = 0.0F;
             SDL_GetMouseState(&mouse_x, &mouse_y);
+            draw_subdivision_controls(editor_world, width, height);
             draw_sculpt_button(editor_world, width, height, mouse_x, mouse_y);
             draw_entity_dropdown(editor_world, width, height);
         }

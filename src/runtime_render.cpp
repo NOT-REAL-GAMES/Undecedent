@@ -237,8 +237,13 @@ int draw_deferred_runtime_world(
 
     glBindFramebuffer(GL_FRAMEBUFFER, renderer.framebuffer);
     glViewport(0, 0, width, height);
-    const GLenum draw_buffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
-    glDrawBuffers(3, draw_buffers);
+    const GLenum draw_buffers[] = {
+        GL_COLOR_ATTACHMENT0,
+        GL_COLOR_ATTACHMENT1,
+        GL_COLOR_ATTACHMENT2,
+        GL_COLOR_ATTACHMENT3,
+    };
+    glDrawBuffers(4, draw_buffers);
     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -250,6 +255,7 @@ int draw_deferred_runtime_world(
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2);
+    glEnableVertexAttribArray(3);
     glVertexAttribPointer(
         0,
         3,
@@ -274,6 +280,14 @@ int draw_deferred_runtime_world(
         sizeof(RuntimeRenderVertex),
         reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, nx))
     );
+    glVertexAttribPointer(
+        3,
+        3,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(RuntimeRenderVertex),
+        reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, roughness))
+    );
 
     if (!filter_visible_sectors) {
         glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
@@ -292,6 +306,7 @@ int draw_deferred_runtime_world(
         }
     }
 
+    glDisableVertexAttribArray(3);
     glDisableVertexAttribArray(2);
     glDisableVertexAttribArray(1);
     glDisableVertexAttribArray(0);
@@ -314,6 +329,9 @@ int draw_deferred_runtime_world(
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, renderer.albedo_texture);
     glUniform1i(glGetUniformLocation(renderer.lighting_program, "uAlbedo"), 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, renderer.material_texture);
+    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uMaterial"), 3);
     glUniform2f(
         glGetUniformLocation(renderer.lighting_program, "uInvViewport"),
         1.0F / static_cast<float>(width),
@@ -365,6 +383,8 @@ int draw_deferred_runtime_world(
     glVertex2f(-1.0F, 1.0F);
     glEnd();
     glUseProgram(0);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE1);

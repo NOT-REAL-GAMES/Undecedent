@@ -36,8 +36,19 @@ bool sculpt_button_rect(const int width, const int height, float& x, float& y, f
         return false;
     }
     x = 14.0F;
-    y = 14.0F;
+    y = 52.0F;
     w = 112.0F;
+    h = 30.0F;
+    return true;
+}
+
+bool subdivision_controls_rect(const int width, const int height, float& x, float& y, float& w, float& h) {
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    x = 14.0F;
+    y = 14.0F;
+    w = 176.0F;
     h = 30.0F;
     return true;
 }
@@ -106,12 +117,38 @@ bool handle_sculpt_button_click(
     float y = 0.0F;
     float w = 0.0F;
     float h = 0.0F;
-    if (!sculpt_button_rect(width, height, x, y, w, h) || !point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
+    if (selected_sector_subdivision(editor_world) <= 0 ||
+        !sculpt_button_rect(width, height, x, y, w, h) ||
+        !point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
         return false;
     }
     editor_world.displacement_sculpt_enabled = !editor_world.displacement_sculpt_enabled;
     std::cout << "Displacement sculpt "
               << (editor_world.displacement_sculpt_enabled ? "enabled" : "disabled") << '\n';
+    return true;
+}
+
+bool handle_subdivision_controls_click(
+    EditorWorld& editor_world,
+    const int width,
+    const int height,
+    const float mouse_x,
+    const float mouse_y
+) {
+    float x = 0.0F;
+    float y = 0.0F;
+    float w = 0.0F;
+    float h = 0.0F;
+    if (!subdivision_controls_rect(width, height, x, y, w, h) ||
+        !point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
+        return false;
+    }
+
+    if (mouse_x <= x + 34.0F) {
+        adjust_selected_sector_subdivision(editor_world, -1);
+    } else if (mouse_x >= x + w - 34.0F) {
+        adjust_selected_sector_subdivision(editor_world, 1);
+    }
     return true;
 }
 
@@ -126,7 +163,8 @@ void draw_sculpt_button(
     float y = 0.0F;
     float w = 0.0F;
     float h = 0.0F;
-    if (!sculpt_button_rect(width, height, x, y, w, h)) {
+    if (selected_sector_subdivision(editor_world) <= 0 ||
+        !sculpt_button_rect(width, height, x, y, w, h)) {
         return;
     }
 
@@ -179,6 +217,51 @@ void draw_sculpt_button(
         glEnd();
         glLineWidth(1.0F);
     }
+    glDisable(GL_BLEND);
+}
+
+void draw_subdivision_controls(const EditorWorld& editor_world, const int width, const int height) {
+    float x = 0.0F;
+    float y = 0.0F;
+    float w = 0.0F;
+    float h = 0.0F;
+    if (!subdivision_controls_rect(width, height, x, y, w, h)) {
+        return;
+    }
+
+    const int subdivision = selected_sector_subdivision(editor_world);
+    const bool has_selection =
+        editor_world.selected_sector >= 0 &&
+        editor_world.selected_sector < static_cast<int>(editor_world.sectors.size());
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBegin(GL_QUADS);
+    glColor4f(0.0F, 0.0F, 0.0F, has_selection ? 0.50F : 0.28F);
+    draw_screen_quad(x, y, w, h, width, height);
+    glEnd();
+
+    glLineWidth(1.5F);
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, has_selection ? 0.92F : 0.38F);
+    draw_screen_line(x, y, x + w, y, width, height);
+    draw_screen_line(x + w, y, x + w, y + h, width, height);
+    draw_screen_line(x + w, y + h, x, y + h, width, height);
+    draw_screen_line(x, y + h, x, y, width, height);
+    draw_screen_line(x + 34.0F, y, x + 34.0F, y + h, width, height);
+    draw_screen_line(x + w - 34.0F, y, x + w - 34.0F, y + h, width, height);
+
+    draw_screen_line(x + 11.0F, y + 15.0F, x + 23.0F, y + 15.0F, width, height);
+    draw_screen_line(x + w - 23.0F, y + 15.0F, x + w - 11.0F, y + 15.0F, width, height);
+    draw_screen_line(x + w - 17.0F, y + 9.0F, x + w - 17.0F, y + 21.0F, width, height);
+    glEnd();
+
+    const std::string label = has_selection
+        ? "SUBDIV " + std::to_string(subdivision)
+        : "SUBDIV -";
+    draw_stroke_text(label, x + 46.0F, y + 9.0F, 5.5F, width, height);
+    glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }
 

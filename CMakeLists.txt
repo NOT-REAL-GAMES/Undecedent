@@ -127,3 +127,10 @@ add_executable(UndecedentDisplacementTests
 )
 
 target_include_directories(UndecedentDisplacementTests PRIVATE include)
+
+add_executable(UndecedentMaterialsTests
+    tests/materials_tests.cpp
+    src/materials.cpp
+)
+
+target_include_directories(UndecedentMaterialsTests PRIVATE include)

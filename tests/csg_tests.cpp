@@ -649,5 +649,43 @@ int main() {
         );
     }
 
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_displacement.resolution = 4;
+        undecedent::sculpt_surface_displacement(
+            sectors.front(),
+            undecedent::SectorSurfaceKind::Floor,
+            Vec2{5, 5},
+            32.0F,
+            8.0F
+        );
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        sectors = knife(sectors, Vec2{15, -2}, Vec2{15, 12});
+        const SectorPlane& right_a = sector_at_point(sectors, Vec2{12.5F, 5.0F});
+        const SectorPlane& right_b = sector_at_point(sectors, Vec2{17.5F, 5.0F});
+        expect(!right_a.floor_displacement.enabled, "knife split should not enable subdivision on flat connected sector");
+        expect(!right_b.floor_displacement.enabled, "knife split should keep both flat connected pieces unsubdivided");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_displacement.resolution = 4;
+        undecedent::sculpt_surface_displacement(
+            sectors.front(),
+            undecedent::SectorSurfaceKind::Floor,
+            Vec2{5, 5},
+            32.0F,
+            8.0F
+        );
+        sectors.front().outer.vertices[2] = Vec2{8, 10};
+        const undecedent::CsgAddResult rebuilt = undecedent::csg_rebuild_sectors(sectors);
+        expect(rebuilt.ok, "rebuild after vertex edit should succeed");
+        expect(rebuilt.sectors.size() == 1, "single edited sector should stay single after rebuild");
+        expect(
+            rebuilt.sectors.front().floor_displacement.enabled,
+            "rebuild after vertex edit should preserve subdivision despite stale source triangles"
+        );
+    }
+
     return EXIT_SUCCESS;
 }

@@ -19,6 +19,9 @@ struct RuntimeRenderVertex {
     float nx = 0.0F;
     float ny = 1.0F;
     float nz = 0.0F;
+    float roughness = 0.72F;
+    float metallic = 0.0F;
+    float specular = 0.04F;
 };
 
 struct RuntimeRenderRange {

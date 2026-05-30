@@ -3,9 +3,12 @@
 #include "undecedent/displacement.hpp"
 
 #include <cstdlib>
+#include <cstdint>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -35,6 +38,80 @@ void write_text(const std::filesystem::path& path, const std::string& text) {
     output << text;
 }
 
+bool file_starts_with(const std::filesystem::path& path, const std::string& prefix) {
+    std::ifstream input(path, std::ios::binary);
+    std::string bytes(prefix.size(), '\0');
+    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    return bytes == prefix;
+}
+
+bool has_displacement_sample_near(
+    const undecedent::SectorSurfaceDisplacement& displacement,
+    const Vec2 position,
+    const float offset
+) {
+    for (const undecedent::SectorDisplacementSample& sample : displacement.samples) {
+        if (std::abs(sample.position.x - position.x) <= 0.001F &&
+            std::abs(sample.position.y - position.y) <= 0.001F &&
+            std::abs(sample.offset - offset) <= 0.001F) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void corrupt_last_byte(const std::filesystem::path& path) {
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    expect(size > 0, "file should be non-empty before corruption");
+    file.seekg(size - 1);
+    char byte = 0;
+    file.read(&byte, 1);
+    byte = static_cast<char>(byte ^ 0x7F);
+    file.seekp(size - 1);
+    file.write(&byte, 1);
+}
+
+std::uint32_t read_u32(const std::vector<unsigned char>& bytes, const std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+        (static_cast<std::uint32_t>(bytes[offset + 1]) << 8U) |
+        (static_cast<std::uint32_t>(bytes[offset + 2]) << 16U) |
+        (static_cast<std::uint32_t>(bytes[offset + 3]) << 24U);
+}
+
+std::uint64_t read_u64(const std::vector<unsigned char>& bytes, const std::size_t offset) {
+    std::uint64_t value = 0;
+    for (int shift = 0; shift < 64; shift += 8) {
+        value |= static_cast<std::uint64_t>(bytes[offset + static_cast<std::size_t>(shift / 8)]) << shift;
+    }
+    return value;
+}
+
+std::string sector_chunk_payload(const std::filesystem::path& path, const std::uint64_t sector_id) {
+    std::ifstream input(path, std::ios::binary);
+    std::vector<unsigned char> bytes(std::istreambuf_iterator<char>(input), {});
+    expect(bytes.size() >= 32, "chunked file should contain a header");
+    const std::uint32_t chunk_count = read_u32(bytes, 12);
+    constexpr std::size_t directory_offset = 32;
+    constexpr std::size_t entry_size = 56;
+    for (std::uint32_t i = 0; i < chunk_count; ++i) {
+        const std::size_t entry = directory_offset + (static_cast<std::size_t>(i) * entry_size);
+        const std::string type(reinterpret_cast<const char*>(&bytes[entry]), 4);
+        const std::uint64_t id = read_u64(bytes, entry + 8);
+        if (type != "SECT" || id != sector_id) {
+            continue;
+        }
+        const std::uint64_t offset = read_u64(bytes, entry + 16);
+        const std::uint64_t size = read_u64(bytes, entry + 24);
+        return std::string(
+            reinterpret_cast<const char*>(&bytes[static_cast<std::size_t>(offset)]),
+            static_cast<std::size_t>(size)
+        );
+    }
+    return {};
+}
+
 } // namespace
 
 int main() {
@@ -44,10 +121,12 @@ int main() {
         sector.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
         const undecedent::SaveMapResult saved = undecedent::save_map_file({sector}, path);
         expect(saved.ok, "rectangle save should succeed");
+        expect(file_starts_with(path, std::string("UDMAP3\0\0", 8)), "new saves should use chunked v3 magic");
 
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "rectangle load should succeed");
         expect(loaded.sectors.size() == 1, "rectangle load should contain one sector");
+        expect(loaded.sectors.front().id != 0, "loaded chunked sector should have a stable id");
         expect(loaded.sectors.front().height == 96.0F, "default height should round-trip");
         expect(!loaded.sectors.front().triangles.empty(), "loaded sector should rebuild triangles");
         std::filesystem::remove(path);
@@ -109,6 +188,38 @@ int main() {
         expect(loaded.sectors.front().floor_displacement.enabled, "floor displacement should round-trip as enabled");
         expect(loaded.sectors.front().ceiling_displacement.enabled, "ceiling displacement should round-trip as enabled");
         expect(!loaded.sectors.front().floor_displacement.samples.empty(), "floor displacement samples should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_sparse_displacement.udmap");
+        SectorPlane sector;
+        sector.id = 300;
+        sector.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
+        sector.floor_displacement.enabled = true;
+        sector.floor_displacement.resolution = 4;
+        sector.floor_displacement.samples = {
+            {{10, 0}, 8.0F},
+        };
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({sector}, path);
+        expect(saved.ok, "sparse displacement save should succeed");
+        const std::string payload = sector_chunk_payload(path, 300);
+        expect(
+            payload.find("surface_displacement_sparse floor 4") != std::string::npos,
+            "mostly flat displacement should save sparsely"
+        );
+        expect(
+            payload.find("surface_displacement_sample") == std::string::npos,
+            "sparse displacement should avoid dense sample position records"
+        );
+
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "sparse displacement load should succeed");
+        expect(loaded.sectors.front().floor_displacement.enabled, "sparse displacement should load enabled");
+        expect(
+            has_displacement_sample_near(loaded.sectors.front().floor_displacement, Vec2{10, 0}, 8.0F),
+            "sparse displacement offset should round-trip at generated sample point"
+        );
         std::filesystem::remove(path);
     }
 
@@ -227,6 +338,48 @@ int main() {
         expect(loaded.sectors.front().floor_height == 0.0F, "legacy map floor should default to zero");
         expect(loaded.sectors.front().floor_material == 0, "legacy map floor material should default to zero");
         expect(loaded.sectors.front().wall_materials.size() == 4, "legacy map wall materials should be generated");
+        const undecedent::SaveMapResult resaved =
+            undecedent::save_map_file(loaded.sectors, loaded.player_spawn, loaded.point_lights, path);
+        expect(resaved.ok, "legacy-loaded map should resave");
+        expect(file_starts_with(path, std::string("UDMAP3\0\0", 8)), "legacy maps should resave as chunked v3");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_bad_checksum.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({sector}, path);
+        expect(saved.ok, "checksum test save should succeed");
+        corrupt_last_byte(path);
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(!loaded.ok, "corrupted chunk payload should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_dirty_sector.udmap");
+        SectorPlane left;
+        left.id = 100;
+        left.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
+        SectorPlane right;
+        right.id = 200;
+        right.outer = loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}});
+        right.floor_material = 3;
+        undecedent::PlayerSpawn spawn;
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({left, right}, spawn, {}, path);
+        expect(saved.ok, "dirty save setup should succeed");
+        const std::string right_before = sector_chunk_payload(path, 200);
+        left.floor_material = 5;
+        undecedent::MapDirtyState dirty;
+        dirty.sector_ids.insert(100);
+        const undecedent::SaveMapResult dirty_saved =
+            undecedent::save_map_file_dirty({left, right}, spawn, {}, dirty, path);
+        expect(dirty_saved.ok, "dirty sector save should succeed");
+        expect(sector_chunk_payload(path, 200) == right_before, "unchanged sector chunk should be preserved");
+        expect(sector_chunk_payload(path, 100).find("materials 5 0") != std::string::npos, "dirty sector chunk should be rewritten");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "dirty-saved map should load");
         std::filesystem::remove(path);
     }
 
@@ -240,6 +393,28 @@ int main() {
             "sectors 0\n");
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(!loaded.ok, "negative point light radius should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_bad_sparse_displacement.udmap");
+        write_text(path,
+            "UNDECEDENT_MAP 1\n"
+            "sectors 1\n"
+            "sector\n"
+            "height 96\n"
+            "outer 4\n"
+            "v 0 0\n"
+            "v 10 0\n"
+            "v 10 10\n"
+            "v 0 10\n"
+            "holes 0\n"
+            "surface_displacement_sparse floor 1 4 2\n"
+            "surface_displacement_offset 0 4\n"
+            "surface_displacement_offset 0 5\n"
+            "endsector\n");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(!loaded.ok, "duplicate sparse displacement sample index should be rejected");
         std::filesystem::remove(path);
     }
 

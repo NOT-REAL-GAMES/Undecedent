@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,7 @@ struct SectorSurfaceDisplacement {
 };
 
 struct SectorPlane {
+    std::uint64_t id = 0;
     PolygonLoop outer;
     std::vector<PolygonLoop> holes;
     std::vector<Triangle> triangles;
@@ -93,12 +95,14 @@ struct MeshPlaneSource {
 };
 
 struct PlayerSpawn {
+    std::uint64_t id = 0;
     Vec3 position{0.0F, 48.0F, 0.0F};
     float yaw = 0.0F;
     bool set = false;
 };
 
 struct PointLight {
+    std::uint64_t id = 0;
     Vec3 position{0.0F, 64.0F, 0.0F};
     Vec3 color{1.0F, 0.86F, 0.62F};
     float radius = 384.0F;

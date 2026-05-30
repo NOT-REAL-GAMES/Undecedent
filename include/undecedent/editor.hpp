@@ -1,6 +1,7 @@
 #pragma once
 
 #include "undecedent/geometry.hpp"
+#include "undecedent/map_io.hpp"
 #include "undecedent/runtime_render_cache.hpp"
 #include "undecedent/runtime_world.hpp"
 
@@ -65,6 +66,7 @@ struct EditorWorld {
     std::set<int> selected_sectors;
     std::vector<EditorHistorySnapshot> undo_stack;
     std::vector<EditorHistorySnapshot> redo_stack;
+    std::set<std::uint64_t> dirty_sector_ids;
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
     RuntimeWorld runtime_world;
@@ -86,6 +88,10 @@ struct EditorWorld {
     bool has_dragged_committed_vertex = false;
     bool dragged_draft_vertex_moved = false;
     bool dragged_committed_vertex_moved = false;
+    bool dirty_entities = false;
+    bool dirty_metadata = false;
+    bool dirty_materials = false;
+    bool dirty_topology = false;
 };
 
 float screen_to_world_x(float screen_x, int width, const EditorCamera& camera);
@@ -153,6 +159,12 @@ void update_snapped_mouse(
 );
 
 void rebuild_runtime_geometry(EditorWorld& editor_world);
+MapDirtyState editor_map_dirty_state(const EditorWorld& editor_world);
+void clear_map_dirty_state(EditorWorld& editor_world);
+void mark_sector_dirty(EditorWorld& editor_world, std::size_t sector_index);
+void mark_entities_dirty(EditorWorld& editor_world);
+void mark_topology_dirty(EditorWorld& editor_world);
+void ensure_editor_stable_ids(EditorWorld& editor_world);
 EditorHistorySnapshot make_history_snapshot(const EditorWorld& editor_world);
 void push_undo_snapshot(EditorWorld& editor_world, EditorHistorySnapshot snapshot, const char* label);
 void push_undo_snapshot(EditorWorld& editor_world, const char* label);
@@ -173,6 +185,8 @@ void normalize_sector_materials(SectorPlane& sector);
 bool apply_material_to_surface(EditorWorld& editor_world, const SurfacePick& pick, int material_id);
 bool sculpt_displacement_at_pick(EditorWorld& editor_world, const SurfacePick& pick, float delta);
 void adjust_displacement_brush_radius(EditorWorld& editor_world, float delta);
+int selected_sector_subdivision(const EditorWorld& editor_world);
+bool adjust_selected_sector_subdivision(EditorWorld& editor_world, int delta);
 
 TriangulationResult draft_preview_result(const EditorWorld& editor_world);
 void refresh_draft(EditorWorld& editor_world);

@@ -90,6 +90,75 @@ bool point_in_sector_triangulation(const SectorPlane& sector, const Vec2 point) 
     });
 }
 
+bool point_on_segment(const Vec2 a, const Vec2 b, const Vec2 point) {
+    const float cross = ((b.x - a.x) * (point.y - a.y)) - ((b.y - a.y) * (point.x - a.x));
+    if (std::abs(cross) > kDisplacementEpsilon) {
+        return false;
+    }
+
+    return point.x >= std::min(a.x, b.x) - kDisplacementEpsilon &&
+        point.x <= std::max(a.x, b.x) + kDisplacementEpsilon &&
+        point.y >= std::min(a.y, b.y) - kDisplacementEpsilon &&
+        point.y <= std::max(a.y, b.y) + kDisplacementEpsilon;
+}
+
+bool point_in_loop_or_on(const PolygonLoop& loop, const Vec2 point) {
+    if (loop.vertices.size() < 3) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+        if (point_on_segment(loop.vertices[i], loop.vertices[(i + 1) % loop.vertices.size()], point)) {
+            return true;
+        }
+    }
+
+    bool inside = false;
+    for (std::size_t i = 0, j = loop.vertices.size() - 1; i < loop.vertices.size(); j = i++) {
+        const Vec2 a = loop.vertices[i];
+        const Vec2 b = loop.vertices[j];
+        const bool crosses = ((a.y > point.y) != (b.y > point.y)) &&
+            (point.x < ((b.x - a.x) * (point.y - a.y) / (b.y - a.y)) + a.x);
+        if (crosses) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+bool point_in_loop_strict(const PolygonLoop& loop, const Vec2 point) {
+    if (loop.vertices.size() < 3) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+        if (point_on_segment(loop.vertices[i], loop.vertices[(i + 1) % loop.vertices.size()], point)) {
+            return false;
+        }
+    }
+
+    bool inside = false;
+    for (std::size_t i = 0, j = loop.vertices.size() - 1; i < loop.vertices.size(); j = i++) {
+        const Vec2 a = loop.vertices[i];
+        const Vec2 b = loop.vertices[j];
+        const bool crosses = ((a.y > point.y) != (b.y > point.y)) &&
+            (point.x < ((b.x - a.x) * (point.y - a.y) / (b.y - a.y)) + a.x);
+        if (crosses) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+bool point_in_sector_source_shape(const SectorPlane& sector, const Vec2 point) {
+    if (!point_in_loop_strict(sector.outer, point)) {
+        return false;
+    }
+    return std::none_of(sector.holes.begin(), sector.holes.end(), [point](const PolygonLoop& hole) {
+        return point_in_loop_or_on(hole, point);
+    });
+}
+
 Vec2 subdivided_point(const Triangle& triangle, const int i, const int j, const int resolution) {
     const float u = static_cast<float>(i) / static_cast<float>(resolution);
     const float v = static_cast<float>(j) / static_cast<float>(resolution);
@@ -405,9 +474,14 @@ void resample_displacements_from_sources(SectorPlane& sector, const std::vector<
         ensure_displacement_samples(sector, surface);
         bool sampled_from_source = false;
         for (SectorDisplacementSample& sample : target_displacement.samples) {
-            const auto source = std::find_if(sources.begin(), sources.end(), [point = sample.position](const SectorPlane& candidate) {
-                return point_in_sector_triangulation(candidate, point);
-            });
+            const auto source = std::find_if(
+                sources.begin(),
+                sources.end(),
+                [surface, point = sample.position](const SectorPlane& candidate) {
+                    return displacement_for_surface(candidate, surface).enabled &&
+                        point_in_sector_source_shape(candidate, point);
+                }
+            );
             if (source == sources.end()) {
                 sample.offset = 0.0F;
                 continue;

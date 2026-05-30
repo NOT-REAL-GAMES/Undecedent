@@ -478,6 +478,79 @@ void rebuild_runtime_geometry(EditorWorld& editor_world) {
     rebuild_runtime_render_cache(editor_world.runtime_render_cache, editor_world.runtime_world);
 }
 
+MapDirtyState editor_map_dirty_state(const EditorWorld& editor_world) {
+    return MapDirtyState{
+        editor_world.dirty_sector_ids,
+        editor_world.dirty_entities,
+        editor_world.dirty_metadata,
+        editor_world.dirty_materials,
+        editor_world.dirty_topology,
+    };
+}
+
+void clear_map_dirty_state(EditorWorld& editor_world) {
+    editor_world.dirty_sector_ids.clear();
+    editor_world.dirty_entities = false;
+    editor_world.dirty_metadata = false;
+    editor_world.dirty_materials = false;
+    editor_world.dirty_topology = false;
+}
+
+void mark_sector_dirty(EditorWorld& editor_world, const std::size_t sector_index) {
+    if (sector_index >= editor_world.sectors.size()) {
+        editor_world.dirty_topology = true;
+        return;
+    }
+    const std::uint64_t id = editor_world.sectors[sector_index].id;
+    if (id == 0) {
+        editor_world.dirty_topology = true;
+        return;
+    }
+    editor_world.dirty_sector_ids.insert(id);
+}
+
+void mark_entities_dirty(EditorWorld& editor_world) {
+    editor_world.dirty_entities = true;
+}
+
+void mark_topology_dirty(EditorWorld& editor_world) {
+    ensure_editor_stable_ids(editor_world);
+    editor_world.dirty_topology = true;
+    editor_world.dirty_sector_ids.clear();
+}
+
+void ensure_editor_stable_ids(EditorWorld& editor_world) {
+    std::set<std::uint64_t> used;
+    std::uint64_t next_id = 1;
+    auto ensure_id = [&used, &next_id](std::uint64_t& id) {
+        if (id != 0 && !used.contains(id)) {
+            used.insert(id);
+            next_id = std::max(next_id, id + 1U);
+            return false;
+        }
+        while (next_id == 0 || used.contains(next_id)) {
+            ++next_id;
+        }
+        id = next_id++;
+        used.insert(id);
+        return true;
+    };
+
+    bool assigned = false;
+    for (SectorPlane& sector : editor_world.sectors) {
+        assigned = ensure_id(sector.id) || assigned;
+    }
+    if (editor_world.player_spawn.set) {
+        assigned = ensure_id(editor_world.player_spawn.id) || assigned;
+    }
+    for (PointLight& light : editor_world.point_lights) {
+        assigned = ensure_id(light.id) || assigned;
+    }
+    if (assigned) {
+        editor_world.dirty_metadata = true;
+    }
+}
+
 EditorHistorySnapshot make_history_snapshot(const EditorWorld& editor_world) {
     return EditorHistorySnapshot{
         editor_world.sectors,
@@ -538,6 +611,8 @@ bool undo_editor_action(EditorWorld& editor_world) {
     const EditorHistorySnapshot snapshot = std::move(editor_world.undo_stack.back());
     editor_world.undo_stack.pop_back();
     restore_history_snapshot(editor_world, snapshot);
+    mark_topology_dirty(editor_world);
+    mark_entities_dirty(editor_world);
     std::cout << "Undo.\n";
     return true;
 }
@@ -558,6 +633,8 @@ bool redo_editor_action(EditorWorld& editor_world) {
     const EditorHistorySnapshot snapshot = std::move(editor_world.redo_stack.back());
     editor_world.redo_stack.pop_back();
     restore_history_snapshot(editor_world, snapshot);
+    mark_topology_dirty(editor_world);
+    mark_entities_dirty(editor_world);
     std::cout << "Redo.\n";
     return true;
 }
@@ -582,6 +659,7 @@ void place_entity(EditorWorld& editor_world, const Vec3 position, const float ya
         std::cout << "Placed point light at " << position.x << ", " << position.y << ", " << position.z << '\n';
         break;
     }
+    mark_entities_dirty(editor_world);
 }
 
 void place_entity_at_origin(
@@ -599,6 +677,7 @@ void place_entity_at_origin(
     editor_world.player_spawn.position = Vec3{origin.x, origin.y + player_eye_height, origin.z};
     editor_world.player_spawn.yaw = yaw;
     editor_world.player_spawn.set = true;
+    mark_entities_dirty(editor_world);
     std::cout << "Placed player spawn origin at " << origin.x << ", " << origin.y << ", " << origin.z << '\n';
 }
 
@@ -686,6 +765,7 @@ bool apply_material_to_surface(EditorWorld& editor_world, const SurfacePick& pic
     }
 
     rebuild_runtime_geometry(editor_world);
+    mark_sector_dirty(editor_world, static_cast<std::size_t>(pick.sector_id));
     return true;
 }
 
@@ -716,6 +796,7 @@ bool sculpt_displacement_at_pick(EditorWorld& editor_world, const SurfacePick& p
         return false;
     }
     rebuild_runtime_geometry(editor_world);
+    mark_sector_dirty(editor_world, static_cast<std::size_t>(pick.sector_id));
     clear_selection_outside_slice(editor_world);
     return true;
 }
@@ -726,6 +807,91 @@ void adjust_displacement_brush_radius(EditorWorld& editor_world, const float del
     std::cout << "Displacement brush radius: "
               << format_world_units(editor_world.displacement_brush_radius)
               << "u\n";
+}
+
+int selected_sector_subdivision(const EditorWorld& editor_world) {
+    if (editor_world.selected_sector < 0 ||
+        editor_world.selected_sector >= static_cast<int>(editor_world.sectors.size())) {
+        return 0;
+    }
+
+    const SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(editor_world.selected_sector)];
+    int subdivision = 0;
+    if (sector.floor_displacement.enabled) {
+        subdivision = std::max(subdivision, clamped_displacement_resolution(sector.floor_displacement.resolution));
+    }
+    if (sector.ceiling_displacement.enabled) {
+        subdivision = std::max(subdivision, clamped_displacement_resolution(sector.ceiling_displacement.resolution));
+    }
+    return subdivision;
+}
+
+bool adjust_selected_sector_subdivision(EditorWorld& editor_world, const int delta) {
+    if (editor_world.selected_sectors.empty()) {
+        std::cout << "Select at least one sector before adjusting subdivision.\n";
+        return false;
+    }
+
+    struct Target {
+        int sector_index = -1;
+        int current = 0;
+        int next = 0;
+    };
+
+    std::vector<Target> targets;
+    for (const int sector_index : editor_world.selected_sectors) {
+        if (sector_index < 0 || sector_index >= static_cast<int>(editor_world.sectors.size())) {
+            continue;
+        }
+        const SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(sector_index)];
+        int current = 0;
+        if (sector.floor_displacement.enabled) {
+            current = std::max(current, clamped_displacement_resolution(sector.floor_displacement.resolution));
+        }
+        if (sector.ceiling_displacement.enabled) {
+            current = std::max(current, clamped_displacement_resolution(sector.ceiling_displacement.resolution));
+        }
+
+        int next = current + delta;
+        if (delta > 0 && current == 0) {
+            next = 1;
+        }
+        next = std::clamp(next, 0, kMaxDisplacementResolution);
+        if (next != current) {
+            targets.push_back(Target{sector_index, current, next});
+        }
+    }
+
+    if (targets.empty()) {
+        std::cout << "Selected sector subdivision is already at the limit.\n";
+        return false;
+    }
+
+    push_undo_snapshot(editor_world, "sector subdivision");
+    for (const Target target : targets) {
+        SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(target.sector_index)];
+        if (target.next == 0) {
+            sector.floor_displacement.enabled = false;
+            sector.floor_displacement.samples.clear();
+            sector.ceiling_displacement.enabled = false;
+            sector.ceiling_displacement.samples.clear();
+        } else {
+            sector.floor_displacement.enabled = true;
+            sector.floor_displacement.resolution = target.next;
+            ensure_displacement_samples(sector, SectorSurfaceKind::Floor);
+            sector.ceiling_displacement.enabled = true;
+            sector.ceiling_displacement.resolution = target.next;
+            ensure_displacement_samples(sector, SectorSurfaceKind::Ceiling);
+        }
+        mark_sector_dirty(editor_world, static_cast<std::size_t>(target.sector_index));
+    }
+
+    rebuild_runtime_geometry(editor_world);
+    if (selected_sector_subdivision(editor_world) == 0) {
+        editor_world.displacement_sculpt_enabled = false;
+    }
+    std::cout << "Adjusted sector subdivision for " << targets.size() << " sectors.\n";
+    return true;
 }
 
 TriangulationResult draft_preview_result(const EditorWorld& editor_world) {
@@ -911,6 +1077,7 @@ bool commit_plane_tool(EditorWorld& editor_world) {
 
         push_undo_snapshot(editor_world, "CSG add");
         editor_world.sectors = csg_result.sectors;
+        mark_topology_dirty(editor_world);
         select_single_sector(
             editor_world,
             editor_world.sectors.empty() ? -1 : static_cast<int>(editor_world.sectors.size()) - 1
@@ -936,6 +1103,7 @@ bool commit_plane_tool(EditorWorld& editor_world) {
 
         push_undo_snapshot(editor_world, "CSG subtract");
         editor_world.sectors = csg_result.sectors;
+        mark_topology_dirty(editor_world);
         select_single_sector(
             editor_world,
             editor_world.sectors.empty()
@@ -964,6 +1132,7 @@ bool commit_plane_tool(EditorWorld& editor_world) {
 
         push_undo_snapshot(editor_world, "knife cut");
         editor_world.sectors = csg_result.sectors;
+        mark_topology_dirty(editor_world);
         clear_sector_selection(editor_world);
         clear_selection_outside_slice(editor_world);
         rebuild_runtime_geometry(editor_world);
@@ -990,6 +1159,7 @@ bool merge_selected_sectors(EditorWorld& editor_world) {
 
     push_undo_snapshot(editor_world, "merge sectors");
     editor_world.sectors = merge_result.sectors;
+    mark_topology_dirty(editor_world);
     select_single_sector(
         editor_world,
         editor_world.sectors.empty() ? -1 : static_cast<int>(editor_world.sectors.size()) - 1
@@ -1025,6 +1195,7 @@ bool delete_selected_sectors(EditorWorld& editor_world) {
     push_undo_snapshot(editor_world, "delete sectors");
     const std::size_t deleted_count = editor_world.sectors.size() - delete_result.sectors.size();
     editor_world.sectors = delete_result.sectors;
+    mark_topology_dirty(editor_world);
     clear_sector_selection(editor_world);
     rebuild_runtime_geometry(editor_world);
     std::cout << "Deleted sectors: " << deleted_count << "; sectors: " << editor_world.sectors.size() << '\n';
@@ -1058,6 +1229,7 @@ bool adjust_selected_sector_heights(EditorWorld& editor_world, const float delta
     for (const int sector_index : targets) {
         SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(sector_index)];
         sector.height = std::max(kSectorMinHeight, sector.height + delta);
+        mark_sector_dirty(editor_world, static_cast<std::size_t>(sector_index));
     }
 
     rebuild_runtime_geometry(editor_world);
@@ -1090,6 +1262,7 @@ bool adjust_selected_sector_floor_heights(EditorWorld& editor_world, const float
     for (const int sector_index : targets) {
         SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(sector_index)];
         sector.floor_height += delta;
+        mark_sector_dirty(editor_world, static_cast<std::size_t>(sector_index));
     }
 
     rebuild_runtime_geometry(editor_world);
@@ -1111,6 +1284,7 @@ void finish_committed_vertex_drag(EditorWorld& editor_world) {
             snapshot.sectors = editor_world.committed_drag_snapshot;
             push_undo_snapshot(editor_world, std::move(snapshot), "vertex move");
             editor_world.sectors = rebuild_result.sectors;
+            mark_topology_dirty(editor_world);
             select_single_sector(editor_world, editor_world.selected_sector);
             clear_selection_outside_slice(editor_world);
             rebuild_runtime_geometry(editor_world);
