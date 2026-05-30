@@ -1,4 +1,5 @@
 #include "undecedent/csg.hpp"
+#include "undecedent/displacement.hpp"
 #include "undecedent/physics.hpp"
 
 #include <cstdlib>
@@ -74,6 +75,32 @@ int main() {
         expect(state.position.y == 3.0F, "vertical movement into a ceiling should be rejected");
         state = undecedent::move_player(world, state, Vec3{0, -2, 0}, config);
         expect(state.position.y == 3.0F, "vertical movement below the floor should be rejected");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_displacement.resolution = 1;
+        undecedent::ensure_displacement_samples(sectors.front(), undecedent::SectorSurfaceKind::Floor);
+        for (undecedent::SectorDisplacementSample& sample : sectors.front().floor_displacement.samples) {
+            sample.offset = sample.position.x;
+        }
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        PlayerPhysicsState state{Vec3{1, 4, 5}, -1};
+        state = undecedent::move_player(world, state, Vec3{2, 0, 0}, PlayerPhysicsConfig{0.0F, 6.0F, 3.0F, 18.0F});
+        expect(state.position.x == 3.0F, "player should move horizontally on a sloped floor");
+        expect(state.position.y > 4.0F, "player should step up to the sampled sloped floor");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().height = 12.0F;
+        sectors.front().ceiling_displacement.resolution = 1;
+        undecedent::ensure_displacement_samples(sectors.front(), undecedent::SectorSurfaceKind::Ceiling);
+        for (undecedent::SectorDisplacementSample& sample : sectors.front().ceiling_displacement.samples) {
+            sample.offset = -8.0F;
+        }
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        expect(!undecedent::player_fits_at(world, Vec3{5, 3, 5}, config), "low displaced ceiling should block player");
     }
 
     return EXIT_SUCCESS;

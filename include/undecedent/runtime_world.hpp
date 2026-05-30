@@ -29,6 +29,15 @@ struct RuntimeWallSegment {
     int sector_id = -1;
 };
 
+struct RuntimeHeightTriangle {
+    Vec2 a;
+    Vec2 b;
+    Vec2 c;
+    float ay = 0.0F;
+    float by = 0.0F;
+    float cy = 0.0F;
+};
+
 struct RuntimePortal {
     Vec2 a;
     Vec2 b;
@@ -46,6 +55,12 @@ struct RuntimeSector {
     std::vector<int> portal_ids;
     float floor_height = 0.0F;
     float height = 96.0F;
+    float min_floor_height = 0.0F;
+    float max_floor_height = 0.0F;
+    float min_ceiling_height = 96.0F;
+    float max_ceiling_height = 96.0F;
+    std::vector<RuntimeHeightTriangle> floor_triangles;
+    std::vector<RuntimeHeightTriangle> ceiling_triangles;
 };
 
 struct RuntimeSpatialCell {
@@ -64,6 +79,8 @@ struct RuntimeWorld {
 
 RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, float cell_size = 128.0F);
 
+float runtime_floor_height_at(const RuntimeSector& sector, Vec2 point);
+float runtime_ceiling_height_at(const RuntimeSector& sector, Vec2 point);
 int sector_at_point(const RuntimeWorld& world, Vec3 point);
 std::vector<int> visible_sectors_from(const RuntimeWorld& world, int sector_id);
 std::vector<int> sectors_near_point(const RuntimeWorld& world, Vec3 point);

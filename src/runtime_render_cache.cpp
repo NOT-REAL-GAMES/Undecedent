@@ -4,9 +4,86 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <map>
 
 namespace undecedent {
 namespace {
+
+constexpr std::int64_t kSmoothNormalScale = 1024;
+
+struct SmoothNormalKey {
+    int sector_id = -1;
+    RuntimeSurfaceKind kind = RuntimeSurfaceKind::Floor;
+    std::int64_t x = 0;
+    std::int64_t y = 0;
+    std::int64_t z = 0;
+};
+
+bool operator<(const SmoothNormalKey& a, const SmoothNormalKey& b) {
+    if (a.sector_id != b.sector_id) {
+        return a.sector_id < b.sector_id;
+    }
+    if (a.kind != b.kind) {
+        return static_cast<int>(a.kind) < static_cast<int>(b.kind);
+    }
+    if (a.x != b.x) {
+        return a.x < b.x;
+    }
+    if (a.y != b.y) {
+        return a.y < b.y;
+    }
+    return a.z < b.z;
+}
+
+bool uses_smooth_normals(const RuntimeTaggedTriangle& tagged_triangle) {
+    return tagged_triangle.surface.kind == RuntimeSurfaceKind::Floor ||
+        tagged_triangle.surface.kind == RuntimeSurfaceKind::Ceiling;
+}
+
+std::int64_t normal_coord(const float value) {
+    return static_cast<std::int64_t>(std::llround(static_cast<double>(value) * kSmoothNormalScale));
+}
+
+SmoothNormalKey smooth_normal_key(const RuntimeTaggedTriangle& tagged_triangle, const Vec3 point) {
+    return SmoothNormalKey{
+        tagged_triangle.sector_id,
+        tagged_triangle.surface.kind,
+        normal_coord(point.x),
+        normal_coord(point.y),
+        normal_coord(point.z),
+    };
+}
+
+Vec3 add_vec3(const Vec3 a, const Vec3 b) {
+    return Vec3{a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+Vec3 normalized_vec3(const Vec3 value) {
+    const float length = std::sqrt((value.x * value.x) + (value.y * value.y) + (value.z * value.z));
+    if (length <= 0.00001F) {
+        return Vec3{0.0F, 1.0F, 0.0F};
+    }
+    return Vec3{value.x / length, value.y / length, value.z / length};
+}
+
+Vec3 runtime_triangle_area_normal(const RuntimeTriangle& triangle) {
+    const Vec3 edge_ab{
+        triangle.b.x - triangle.a.x,
+        triangle.b.y - triangle.a.y,
+        triangle.b.z - triangle.a.z,
+    };
+    const Vec3 edge_ac{
+        triangle.c.x - triangle.a.x,
+        triangle.c.y - triangle.a.y,
+        triangle.c.z - triangle.a.z,
+    };
+    return Vec3{
+        -((edge_ab.y * edge_ac.z) - (edge_ab.z * edge_ac.y)),
+        -((edge_ab.z * edge_ac.x) - (edge_ab.x * edge_ac.z)),
+        -((edge_ab.x * edge_ac.y) - (edge_ab.y * edge_ac.x)),
+    };
+}
 
 void append_runtime_vertex(
     std::vector<RuntimeRenderVertex>& vertices,
@@ -21,47 +98,55 @@ void append_runtime_vertex(
 
 void append_runtime_triangle(
     std::vector<RuntimeRenderVertex>& vertices,
-    const RuntimeTaggedTriangle& tagged_triangle
+    const RuntimeTaggedTriangle& tagged_triangle,
+    const std::map<SmoothNormalKey, Vec3>& smooth_normals
 ) {
     const RuntimeTriangle& triangle = tagged_triangle.triangle;
     const MaterialColor color = material_color(tagged_triangle.material_id);
-    const Vec3 normal = runtime_triangle_lighting_normal(triangle);
-    append_runtime_vertex(vertices, triangle.a, color.r, color.g, color.b, normal);
-    append_runtime_vertex(vertices, triangle.b, color.r, color.g, color.b, normal);
-    append_runtime_vertex(vertices, triangle.c, color.r, color.g, color.b, normal);
+    const Vec3 face_normal = runtime_triangle_lighting_normal(triangle);
+    const auto vertex_normal = [&](const Vec3 point) {
+        if (!uses_smooth_normals(tagged_triangle)) {
+            return face_normal;
+        }
+        const auto found = smooth_normals.find(smooth_normal_key(tagged_triangle, point));
+        return found == smooth_normals.end() ? face_normal : found->second;
+    };
+    append_runtime_vertex(vertices, triangle.a, color.r, color.g, color.b, vertex_normal(triangle.a));
+    append_runtime_vertex(vertices, triangle.b, color.r, color.g, color.b, vertex_normal(triangle.b));
+    append_runtime_vertex(vertices, triangle.c, color.r, color.g, color.b, vertex_normal(triangle.c));
+}
+
+std::map<SmoothNormalKey, Vec3> build_smooth_normals(const RuntimeWorld& world) {
+    std::map<SmoothNormalKey, Vec3> accumulated;
+    for (const RuntimeTaggedTriangle& tagged_triangle : world.triangles) {
+        if (!uses_smooth_normals(tagged_triangle)) {
+            continue;
+        }
+        const Vec3 area_normal = runtime_triangle_area_normal(tagged_triangle.triangle);
+        accumulated[smooth_normal_key(tagged_triangle, tagged_triangle.triangle.a)] =
+            add_vec3(accumulated[smooth_normal_key(tagged_triangle, tagged_triangle.triangle.a)], area_normal);
+        accumulated[smooth_normal_key(tagged_triangle, tagged_triangle.triangle.b)] =
+            add_vec3(accumulated[smooth_normal_key(tagged_triangle, tagged_triangle.triangle.b)], area_normal);
+        accumulated[smooth_normal_key(tagged_triangle, tagged_triangle.triangle.c)] =
+            add_vec3(accumulated[smooth_normal_key(tagged_triangle, tagged_triangle.triangle.c)], area_normal);
+    }
+
+    for (auto& [key, normal] : accumulated) {
+        (void)key;
+        normal = normalized_vec3(normal);
+    }
+    return accumulated;
 }
 
 } // namespace
 
 Vec3 runtime_triangle_lighting_normal(const RuntimeTriangle& triangle) {
-    const Vec3 edge_ab{
-        triangle.b.x - triangle.a.x,
-        triangle.b.y - triangle.a.y,
-        triangle.b.z - triangle.a.z,
-    };
-    const Vec3 edge_ac{
-        triangle.c.x - triangle.a.x,
-        triangle.c.y - triangle.a.y,
-        triangle.c.z - triangle.a.z,
-    };
-    Vec3 normal{
-        -((edge_ab.y * edge_ac.z) - (edge_ab.z * edge_ac.y)),
-        -((edge_ab.z * edge_ac.x) - (edge_ab.x * edge_ac.z)),
-        -((edge_ab.x * edge_ac.y) - (edge_ab.y * edge_ac.x)),
-    };
-    const float length = std::sqrt((normal.x * normal.x) + (normal.y * normal.y) + (normal.z * normal.z));
-    if (length > 0.00001F) {
-        normal.x /= length;
-        normal.y /= length;
-        normal.z /= length;
-        return normal;
-    }
-
-    return Vec3{0.0F, 1.0F, 0.0F};
+    return normalized_vec3(runtime_triangle_area_normal(triangle));
 }
 
 void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const RuntimeWorld& world) {
     std::vector<RuntimeRenderVertex> vertices;
+    const std::map<SmoothNormalKey, Vec3> smooth_normals = build_smooth_normals(world);
     render_cache.sector_ranges.assign(world.sectors.size(), RuntimeRenderRange{});
 
     for (std::size_t sector_index = 0; sector_index < world.sectors.size(); ++sector_index) {
@@ -71,7 +156,7 @@ void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const Runtim
             if (tagged_triangle.sector_id != static_cast<int>(sector_index)) {
                 continue;
             }
-            append_runtime_triangle(vertices, tagged_triangle);
+            append_runtime_triangle(vertices, tagged_triangle, smooth_normals);
         }
         range.vertex_count = static_cast<GLsizei>(vertices.size()) - range.first_vertex;
         render_cache.sector_ranges[sector_index] = range;

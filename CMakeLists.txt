@@ -25,6 +25,7 @@ add_executable(Undecedent
     src/csg.cpp
     src/debug_draw.cpp
     src/deferred_renderer.cpp
+    src/displacement.cpp
     src/editor.cpp
     src/editor_render.cpp
     src/editor_ui.cpp
@@ -66,6 +67,7 @@ target_include_directories(UndecedentTriangulatorTests PRIVATE include)
 add_executable(UndecedentCsgTests
     tests/csg_tests.cpp
     src/csg.cpp
+    src/displacement.cpp
     src/triangulator.cpp
 )
 
@@ -80,6 +82,7 @@ target_include_directories(UndecedentEditorSliceTests PRIVATE include)
 add_executable(UndecedentRuntimeGeometryTests
     tests/runtime_geometry_tests.cpp
     src/csg.cpp
+    src/displacement.cpp
     src/runtime_geometry.cpp
     src/triangulator.cpp
 )
@@ -89,6 +92,7 @@ target_include_directories(UndecedentRuntimeGeometryTests PRIVATE include)
 add_executable(UndecedentRuntimeWorldTests
     tests/runtime_world_tests.cpp
     src/csg.cpp
+    src/displacement.cpp
     src/runtime_visibility.cpp
     src/runtime_world.cpp
     src/triangulator.cpp
@@ -99,6 +103,7 @@ target_include_directories(UndecedentRuntimeWorldTests PRIVATE include glad/incl
 add_executable(UndecedentPhysicsTests
     tests/physics_tests.cpp
     src/csg.cpp
+    src/displacement.cpp
     src/physics.cpp
     src/runtime_world.cpp
     src/triangulator.cpp
@@ -108,8 +113,17 @@ target_include_directories(UndecedentPhysicsTests PRIVATE include)
 
 add_executable(UndecedentMapIoTests
     tests/map_io_tests.cpp
+    src/displacement.cpp
     src/map_io.cpp
     src/triangulator.cpp
 )
 
 target_include_directories(UndecedentMapIoTests PRIVATE include)
+
+add_executable(UndecedentDisplacementTests
+    tests/displacement_tests.cpp
+    src/displacement.cpp
+    src/triangulator.cpp
+)
+
+target_include_directories(UndecedentDisplacementTests PRIVATE include)

@@ -1,5 +1,7 @@
 #include "undecedent/map_io.hpp"
 
+#include "undecedent/displacement.hpp"
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -76,6 +78,37 @@ int main() {
         expect(loaded.sectors.front().wall_materials[1] == 5, "wall material should round-trip");
         expect(loaded.sectors.front().hole_wall_materials[0][2] == 3, "hole wall material should round-trip");
         expect(!loaded.sectors.front().triangles.empty(), "sector with hole should rebuild triangles");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_displacement.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
+        sector.floor_displacement.enabled = true;
+        sector.floor_displacement.resolution = 1;
+        sector.floor_displacement.samples = {
+            {{0, 0}, 0.0F},
+            {{10, 0}, 8.0F},
+            {{10, 10}, 8.0F},
+            {{0, 10}, 0.0F},
+        };
+        sector.ceiling_displacement.enabled = true;
+        sector.ceiling_displacement.resolution = 1;
+        sector.ceiling_displacement.samples = {
+            {{0, 0}, 0.0F},
+            {{10, 0}, -4.0F},
+            {{10, 10}, -4.0F},
+            {{0, 10}, 0.0F},
+        };
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({sector}, path);
+        expect(saved.ok, "sector displacement save should succeed");
+
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "sector displacement load should succeed");
+        expect(loaded.sectors.front().floor_displacement.enabled, "floor displacement should round-trip as enabled");
+        expect(loaded.sectors.front().ceiling_displacement.enabled, "ceiling displacement should round-trip as enabled");
+        expect(!loaded.sectors.front().floor_displacement.samples.empty(), "floor displacement samples should round-trip");
         std::filesystem::remove(path);
     }
 

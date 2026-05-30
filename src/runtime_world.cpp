@@ -1,5 +1,7 @@
 #include "undecedent/runtime_world.hpp"
 
+#include "undecedent/displacement.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -23,12 +25,27 @@ void normalize_materials(SectorPlane& sector) {
     }
 }
 
-Vec3 floor_vertex(const Vec2 point, const float floor_height) {
-    return Vec3{point.x, floor_height, point.y};
+Vec3 floor_vertex(const Vec2 point, const float y) {
+    return Vec3{point.x, y, point.y};
 }
 
-Vec3 ceiling_vertex(const Vec2 point, const float floor_height, const float height) {
-    return Vec3{point.x, floor_height + height, point.y};
+float lerp(const float a, const float b, const float t) {
+    return a + ((b - a) * t);
+}
+
+Vec2 lerp(const Vec2 a, const Vec2 b, const float t) {
+    return Vec2{lerp(a.x, b.x, t), lerp(a.y, b.y, t)};
+}
+
+int surface_segment_count(const SectorPlane& sector) {
+    int count = 1;
+    if (sector.floor_displacement.enabled) {
+        count = std::max(count, clamped_displacement_resolution(sector.floor_displacement.resolution));
+    }
+    if (sector.ceiling_displacement.enabled) {
+        count = std::max(count, clamped_displacement_resolution(sector.ceiling_displacement.resolution));
+    }
+    return count;
 }
 
 RuntimeBounds2 bounds_for_loop(const PolygonLoop& loop) {
@@ -146,10 +163,15 @@ bool point_in_sector(const RuntimeSector& sector, const Vec2 point) {
 }
 
 bool point_in_sector_volume(const RuntimeSector& sector, const Vec3 point) {
-    if (point.y < sector.floor_height || point.y > sector.floor_height + sector.height) {
+    if (point.y < sector.min_floor_height - 0.001F || point.y > sector.max_ceiling_height + 0.001F) {
         return false;
     }
-    return point_in_sector(sector, Vec2{point.x, point.z});
+    const Vec2 point_2d{point.x, point.z};
+    if (!point_in_sector(sector, point_2d)) {
+        return false;
+    }
+    return point.y >= runtime_floor_height_at(sector, point_2d) - 0.001F &&
+        point.y <= runtime_ceiling_height_at(sector, point_2d) + 0.001F;
 }
 
 bool vertical_ranges_overlap(const float floor_a, const float height_a, const float floor_b, const float height_b) {
@@ -197,48 +219,59 @@ void add_wall_record(RuntimeWorld& world, const int sector_id, const Vec2 a, con
     insert_wall_cells(world, wall_id, bounds_for_segment(a, b));
 }
 
-void add_wall(
-    RuntimeWorld& world,
-    const int sector_id,
-    const Vec2 a,
-    const Vec2 b,
-    const float floor_height,
-    const float height,
-    const int material_id,
-    const RuntimeSurfaceRef surface
-) {
-    add_wall_record(world, sector_id, a, b);
-
-    const Vec3 bottom_a = floor_vertex(a, floor_height);
-    const Vec3 bottom_b = floor_vertex(b, floor_height);
-    const Vec3 top_a = ceiling_vertex(a, floor_height, height);
-    const Vec3 top_b = ceiling_vertex(b, floor_height, height);
-    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_a, top_b}, material_id, surface);
-    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_b, bottom_b}, material_id, surface);
-}
-
 void add_wall_span(
     RuntimeWorld& world,
     const int sector_id,
     const Vec2 a,
     const Vec2 b,
-    const float bottom,
-    const float top,
+    const float bottom_a,
+    const float bottom_b,
+    const float top_a,
+    const float top_b,
     const int material_id,
     const RuntimeSurfaceRef surface
 ) {
-    if (top <= bottom + 0.001F) {
+    if (top_a <= bottom_a + 0.001F && top_b <= bottom_b + 0.001F) {
         return;
     }
-
     add_wall_record(world, sector_id, a, b);
 
-    const Vec3 bottom_a = floor_vertex(a, bottom);
-    const Vec3 bottom_b = floor_vertex(b, bottom);
-    const Vec3 top_a = floor_vertex(a, top);
-    const Vec3 top_b = floor_vertex(b, top);
-    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_a, top_b}, material_id, surface);
-    add_triangle(world, sector_id, RuntimeTriangle{bottom_a, top_b, bottom_b}, material_id, surface);
+    const Vec3 bottom_va = floor_vertex(a, bottom_a);
+    const Vec3 bottom_vb = floor_vertex(b, bottom_b);
+    const Vec3 top_va = floor_vertex(a, top_a);
+    const Vec3 top_vb = floor_vertex(b, top_b);
+    add_triangle(world, sector_id, RuntimeTriangle{bottom_va, top_va, top_vb}, material_id, surface);
+    add_triangle(world, sector_id, RuntimeTriangle{bottom_va, top_vb, bottom_vb}, material_id, surface);
+}
+
+void add_wall(
+    RuntimeWorld& world,
+    const int sector_id,
+    const SectorPlane& sector,
+    const Vec2 a,
+    const Vec2 b,
+    const int material_id,
+    const RuntimeSurfaceRef surface
+) {
+    const int segments = surface_segment_count(sector);
+    for (int i = 0; i < segments; ++i) {
+        const float t0 = static_cast<float>(i) / static_cast<float>(segments);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(segments);
+        const Vec2 p0 = lerp(a, b, t0);
+        const Vec2 p1 = lerp(a, b, t1);
+        add_wall_span(
+            world,
+            sector_id,
+            p0,
+            p1,
+            sample_surface_height(sector, SectorSurfaceKind::Floor, p0),
+            sample_surface_height(sector, SectorSurfaceKind::Floor, p1),
+            sample_surface_height(sector, SectorSurfaceKind::Ceiling, p0),
+            sample_surface_height(sector, SectorSurfaceKind::Ceiling, p1),
+            material_id,
+            surface
+        );
+    }
 }
 
 void add_neighbor_gap_walls(
@@ -251,20 +284,68 @@ void add_neighbor_gap_walls(
     const int material_id,
     const RuntimeSurfaceRef surface
 ) {
-    const float sector_floor = sector.floor_height;
-    const float sector_ceiling = sector.floor_height + sector.height;
-    const float neighbor_floor = neighbor.floor_height;
-    const float neighbor_ceiling = neighbor.floor_height + neighbor.height;
-    const float overlap_floor = std::max(sector_floor, neighbor_floor);
-    const float overlap_ceiling = std::min(sector_ceiling, neighbor_ceiling);
+    const int segments = std::max(surface_segment_count(sector), surface_segment_count(neighbor));
+    for (int i = 0; i < segments; ++i) {
+        const float t0 = static_cast<float>(i) / static_cast<float>(segments);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(segments);
+        const Vec2 p0 = lerp(a, b, t0);
+        const Vec2 p1 = lerp(a, b, t1);
 
-    if (overlap_ceiling <= overlap_floor + 0.001F) {
-        add_wall_span(world, sector_id, a, b, sector_floor, sector_ceiling, material_id, surface);
-        return;
+        const float sector_floor_0 = sample_surface_height(sector, SectorSurfaceKind::Floor, p0);
+        const float sector_floor_1 = sample_surface_height(sector, SectorSurfaceKind::Floor, p1);
+        const float sector_ceiling_0 = sample_surface_height(sector, SectorSurfaceKind::Ceiling, p0);
+        const float sector_ceiling_1 = sample_surface_height(sector, SectorSurfaceKind::Ceiling, p1);
+        const float neighbor_floor_0 = sample_surface_height(neighbor, SectorSurfaceKind::Floor, p0);
+        const float neighbor_floor_1 = sample_surface_height(neighbor, SectorSurfaceKind::Floor, p1);
+        const float neighbor_ceiling_0 = sample_surface_height(neighbor, SectorSurfaceKind::Ceiling, p0);
+        const float neighbor_ceiling_1 = sample_surface_height(neighbor, SectorSurfaceKind::Ceiling, p1);
+        const float overlap_floor_0 = std::max(sector_floor_0, neighbor_floor_0);
+        const float overlap_floor_1 = std::max(sector_floor_1, neighbor_floor_1);
+        const float overlap_ceiling_0 = std::min(sector_ceiling_0, neighbor_ceiling_0);
+        const float overlap_ceiling_1 = std::min(sector_ceiling_1, neighbor_ceiling_1);
+
+        if (overlap_ceiling_0 <= overlap_floor_0 + 0.001F &&
+            overlap_ceiling_1 <= overlap_floor_1 + 0.001F) {
+            add_wall_span(
+                world,
+                sector_id,
+                p0,
+                p1,
+                sector_floor_0,
+                sector_floor_1,
+                sector_ceiling_0,
+                sector_ceiling_1,
+                material_id,
+                surface
+            );
+            continue;
+        }
+
+        add_wall_span(
+            world,
+            sector_id,
+            p0,
+            p1,
+            sector_floor_0,
+            sector_floor_1,
+            overlap_floor_0,
+            overlap_floor_1,
+            material_id,
+            surface
+        );
+        add_wall_span(
+            world,
+            sector_id,
+            p0,
+            p1,
+            overlap_ceiling_0,
+            overlap_ceiling_1,
+            sector_ceiling_0,
+            sector_ceiling_1,
+            material_id,
+            surface
+        );
     }
-
-    add_wall_span(world, sector_id, a, b, sector_floor, overlap_floor, material_id, surface);
-    add_wall_span(world, sector_id, a, b, overlap_ceiling, sector_ceiling, material_id, surface);
 }
 
 std::vector<int> unique_sorted(std::vector<int> values) {
@@ -294,6 +375,17 @@ std::vector<int> ids_in_bounds(const RuntimeWorld& world, const RuntimeBounds2 b
     return unique_sorted(std::move(ids));
 }
 
+RuntimeHeightTriangle to_runtime_height_triangle(const SurfaceSampleTriangle& triangle) {
+    return RuntimeHeightTriangle{
+        triangle.a.position,
+        triangle.b.position,
+        triangle.c.position,
+        triangle.a.height,
+        triangle.b.height,
+        triangle.c.height,
+    };
+}
+
 } // namespace
 
 RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const float cell_size) {
@@ -310,15 +402,38 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
         runtime_sector.bounds = bounds_for_loop(source.outer);
         runtime_sector.floor_height = source.floor_height;
         runtime_sector.height = source.height;
+        const SurfaceHeightRange floor_range = sector_surface_height_range(source, SectorSurfaceKind::Floor);
+        const SurfaceHeightRange ceiling_range = sector_surface_height_range(source, SectorSurfaceKind::Ceiling);
+        runtime_sector.min_floor_height = floor_range.min_height;
+        runtime_sector.max_floor_height = floor_range.max_height;
+        runtime_sector.min_ceiling_height = ceiling_range.min_height;
+        runtime_sector.max_ceiling_height = ceiling_range.max_height;
+
+        const std::vector<SurfaceSampleTriangle> floor_triangles =
+            build_surface_sample_triangles(source, SectorSurfaceKind::Floor);
+        const std::vector<SurfaceSampleTriangle> ceiling_triangles =
+            build_surface_sample_triangles(source, SectorSurfaceKind::Ceiling);
+        runtime_sector.floor_triangles.reserve(floor_triangles.size());
+        runtime_sector.ceiling_triangles.reserve(ceiling_triangles.size());
+        for (const SurfaceSampleTriangle& triangle : floor_triangles) {
+            runtime_sector.floor_triangles.push_back(to_runtime_height_triangle(triangle));
+        }
+        for (const SurfaceSampleTriangle& triangle : ceiling_triangles) {
+            runtime_sector.ceiling_triangles.push_back(to_runtime_height_triangle(triangle));
+        }
 
         for (const int neighbor : source.edge_neighbors) {
-            if (neighbor >= 0 && neighbor < static_cast<int>(sectors.size()) &&
-                vertical_ranges_overlap(
-                    source.floor_height,
-                    source.height,
-                    sectors[static_cast<std::size_t>(neighbor)].floor_height,
-                    sectors[static_cast<std::size_t>(neighbor)].height
-                )) {
+            if (neighbor >= 0 && neighbor < static_cast<int>(sectors.size())) {
+                const SurfaceHeightRange neighbor_floor =
+                    sector_surface_height_range(sectors[static_cast<std::size_t>(neighbor)], SectorSurfaceKind::Floor);
+                const SurfaceHeightRange neighbor_ceiling =
+                    sector_surface_height_range(sectors[static_cast<std::size_t>(neighbor)], SectorSurfaceKind::Ceiling);
+                const bool overlaps =
+                    std::min(runtime_sector.max_ceiling_height, neighbor_ceiling.max_height) >
+                    std::max(runtime_sector.min_floor_height, neighbor_floor.min_height) + 0.001F;
+                if (!overlaps) {
+                    continue;
+                }
                 insert_unique(runtime_sector.neighbors, neighbor);
             }
         }
@@ -326,25 +441,27 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
         world.sectors.push_back(std::move(runtime_sector));
         insert_sector_cells(world, static_cast<int>(sector_index), world.sectors.back().bounds);
 
-        for (const Triangle& triangle : source.triangles) {
+        for (const SurfaceSampleTriangle& triangle : floor_triangles) {
             add_triangle(
                 world,
                 static_cast<int>(sector_index),
                 RuntimeTriangle{
-                    floor_vertex(triangle.a, source.floor_height),
-                    floor_vertex(triangle.b, source.floor_height),
-                    floor_vertex(triangle.c, source.floor_height),
+                    floor_vertex(triangle.a.position, triangle.a.height),
+                    floor_vertex(triangle.b.position, triangle.b.height),
+                    floor_vertex(triangle.c.position, triangle.c.height),
                 },
                 source.floor_material,
                 RuntimeSurfaceRef{RuntimeSurfaceKind::Floor, -1, -1}
             );
+        }
+        for (const SurfaceSampleTriangle& triangle : ceiling_triangles) {
             add_triangle(
                 world,
                 static_cast<int>(sector_index),
                 RuntimeTriangle{
-                    ceiling_vertex(triangle.c, source.floor_height, source.height),
-                    ceiling_vertex(triangle.b, source.floor_height, source.height),
-                    ceiling_vertex(triangle.a, source.floor_height, source.height),
+                    floor_vertex(triangle.c.position, triangle.c.height),
+                    floor_vertex(triangle.b.position, triangle.b.height),
+                    floor_vertex(triangle.a.position, triangle.a.height),
                 },
                 source.ceiling_material,
                 RuntimeSurfaceRef{RuntimeSurfaceKind::Ceiling, -1, -1}
@@ -361,20 +478,34 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
             const RuntimeSurfaceRef surface{RuntimeSurfaceKind::Wall, static_cast<int>(edge_index), -1};
             if (neighbor >= 0 && neighbor < static_cast<int>(sectors.size())) {
                 const SectorPlane& neighbor_sector = sectors[static_cast<std::size_t>(neighbor)];
-                const float portal_bottom = std::max(source.floor_height, neighbor_sector.floor_height);
-                const float portal_top = std::min(
-                    source.floor_height + source.height,
-                    neighbor_sector.floor_height + neighbor_sector.height
-                );
-                add_portal_record(
-                    world,
-                    static_cast<int>(sector_index),
-                    neighbor,
-                    a,
-                    b,
-                    portal_bottom,
-                    portal_top
-                );
+                const int portal_segments = std::max(surface_segment_count(source), surface_segment_count(neighbor_sector));
+                for (int segment = 0; segment < portal_segments; ++segment) {
+                    const float t0 = static_cast<float>(segment) / static_cast<float>(portal_segments);
+                    const float t1 = static_cast<float>(segment + 1) / static_cast<float>(portal_segments);
+                    const Vec2 p0 = lerp(a, b, t0);
+                    const Vec2 p1 = lerp(a, b, t1);
+                    const float portal_bottom = std::max({
+                        sample_surface_height(source, SectorSurfaceKind::Floor, p0),
+                        sample_surface_height(source, SectorSurfaceKind::Floor, p1),
+                        sample_surface_height(neighbor_sector, SectorSurfaceKind::Floor, p0),
+                        sample_surface_height(neighbor_sector, SectorSurfaceKind::Floor, p1),
+                    });
+                    const float portal_top = std::min({
+                        sample_surface_height(source, SectorSurfaceKind::Ceiling, p0),
+                        sample_surface_height(source, SectorSurfaceKind::Ceiling, p1),
+                        sample_surface_height(neighbor_sector, SectorSurfaceKind::Ceiling, p0),
+                        sample_surface_height(neighbor_sector, SectorSurfaceKind::Ceiling, p1),
+                    });
+                    add_portal_record(
+                        world,
+                        static_cast<int>(sector_index),
+                        neighbor,
+                        p0,
+                        p1,
+                        portal_bottom,
+                        portal_top
+                    );
+                }
                 add_neighbor_gap_walls(
                     world,
                     static_cast<int>(sector_index),
@@ -386,7 +517,7 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
                     surface
                 );
             } else {
-                add_wall(world, static_cast<int>(sector_index), a, b, source.floor_height, source.height, material_id, surface);
+                add_wall(world, static_cast<int>(sector_index), source, a, b, material_id, surface);
             }
         }
 
@@ -400,10 +531,9 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
                 add_wall(
                     world,
                     static_cast<int>(sector_index),
+                    source,
                     hole.vertices[i],
                     hole.vertices[(i + 1) % hole.vertices.size()],
-                    source.floor_height,
-                    source.height,
                     material_id,
                     RuntimeSurfaceRef{RuntimeSurfaceKind::HoleWall, static_cast<int>(hole_index), static_cast<int>(i)}
                 );
@@ -412,6 +542,38 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
     }
 
     return world;
+}
+
+float sample_runtime_height(
+    const std::vector<RuntimeHeightTriangle>& triangles,
+    const Vec2 point,
+    const float fallback
+) {
+    for (const RuntimeHeightTriangle& triangle : triangles) {
+        const Vec2 v0{triangle.b.x - triangle.a.x, triangle.b.y - triangle.a.y};
+        const Vec2 v1{triangle.c.x - triangle.a.x, triangle.c.y - triangle.a.y};
+        const Vec2 v2{point.x - triangle.a.x, point.y - triangle.a.y};
+        const float denom = (v0.x * v1.y) - (v0.y * v1.x);
+        if (std::abs(denom) <= 0.001F) {
+            continue;
+        }
+        const float wb = ((v2.x * v1.y) - (v2.y * v1.x)) / denom;
+        const float wc = ((v0.x * v2.y) - (v0.y * v2.x)) / denom;
+        const float wa = 1.0F - wb - wc;
+        if (wa >= -0.001F && wb >= -0.001F && wc >= -0.001F &&
+            wa <= 1.001F && wb <= 1.001F && wc <= 1.001F) {
+            return (wa * triangle.ay) + (wb * triangle.by) + (wc * triangle.cy);
+        }
+    }
+    return fallback;
+}
+
+float runtime_floor_height_at(const RuntimeSector& sector, const Vec2 point) {
+    return sample_runtime_height(sector.floor_triangles, point, sector.floor_height);
+}
+
+float runtime_ceiling_height_at(const RuntimeSector& sector, const Vec2 point) {
+    return sample_runtime_height(sector.ceiling_triangles, point, sector.floor_height + sector.height);
 }
 
 int sector_at_point(const RuntimeWorld& world, const Vec3 point) {

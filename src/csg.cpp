@@ -1,5 +1,6 @@
 #include "undecedent/csg.hpp"
 
+#include "undecedent/displacement.hpp"
 #include "undecedent/triangulator.hpp"
 
 #include <algorithm>
@@ -845,6 +846,7 @@ CsgAddResult run_csg(
             sector.status_message = triangulated.message;
             sector.edge_neighbors.assign(sector.outer.vertices.size(), -1);
             remap_edge_materials_from_sources(sector, existing_sectors);
+            resample_displacements_from_sources(sector, existing_sectors);
             normalize_materials(sector);
             output.push_back(std::move(sector));
         }
@@ -937,6 +939,7 @@ CsgAddResult contained_hole_subtract_fallback(
         holed_sector.triangles = triangulated.triangles;
         holed_sector.status = triangulated.status;
         holed_sector.status_message = triangulated.message;
+        resample_displacements_from_sources(holed_sector, {sector});
         normalize_materials(holed_sector);
         output.push_back(std::move(holed_sector));
         changed = true;
@@ -1153,6 +1156,7 @@ CsgAddResult merge_selected_sectors(
     merged.status_message = triangulated.message;
     merged.edge_neighbors.assign(merged.outer.vertices.size(), -1);
     remap_edge_materials_from_sources(merged, selected_sources);
+    resample_displacements_from_sources(merged, selected_sources);
     normalize_materials(merged);
 
     std::vector<SectorPlane> output;

@@ -1,4 +1,5 @@
 #include "undecedent/csg.hpp"
+#include "undecedent/displacement.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -603,6 +604,49 @@ int main() {
         expect(sectors.size() == 1, "deleting stacked lower floor should leave upper floor");
         expect(std::abs(sectors.front().floor_height - 96.0F) <= 0.001F, "remaining stacked sector should keep its floor");
         expect_area("delete stacked floor", sectors, 100.0F);
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_displacement.resolution = 2;
+        undecedent::sculpt_surface_displacement(
+            sectors.front(),
+            undecedent::SectorSurfaceKind::Floor,
+            Vec2{5, 5},
+            32.0F,
+            12.0F
+        );
+        sectors = knife(sectors, Vec2{5, -2}, Vec2{5, 12});
+        expect(sectors.size() == 2, "knife should split displaced sector");
+        for (const SectorPlane& sector : sectors) {
+            expect(sector.floor_displacement.enabled, "knife split should preserve floor displacement");
+            const undecedent::Triangle triangle = sector.triangles.front();
+            const Vec2 sample{
+                (triangle.a.x + triangle.b.x + triangle.c.x) / 3.0F,
+                (triangle.a.y + triangle.b.y + triangle.c.y) / 3.0F,
+            };
+            expect(undecedent::sample_surface_height(sector, undecedent::SectorSurfaceKind::Floor, sample) > sector.floor_height,
+                "knife split should resample displaced floor height");
+        }
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().floor_displacement.resolution = 2;
+        undecedent::sculpt_surface_displacement(
+            sectors.front(),
+            undecedent::SectorSurfaceKind::Floor,
+            Vec2{5, 5},
+            32.0F,
+            12.0F
+        );
+        sectors = add(std::move(sectors), loop({{10, 0}, {20, 0}, {20, 10}, {10, 10}}));
+        const SectorPlane& added = sector_at_point(sectors, Vec2{15, 5});
+        expect(
+            std::abs(undecedent::sample_surface_height(added, undecedent::SectorSurfaceKind::Floor, Vec2{15, 5}) -
+                added.floor_height) <= 0.001F,
+            "newly-added CSG space should sample flat"
+        );
     }
 
     return EXIT_SUCCESS;

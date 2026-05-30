@@ -1,4 +1,5 @@
 #include "undecedent/csg.hpp"
+#include "undecedent/displacement.hpp"
 #include "undecedent/runtime_geometry.hpp"
 
 #include <cstdlib>
@@ -53,18 +54,58 @@ int main() {
     }
 
     {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {16, 0}, {16, 16}, {0, 16}}));
+        sectors.front().floor_displacement.resolution = 2;
+        const bool changed = undecedent::sculpt_surface_displacement(
+            sectors.front(),
+            undecedent::SectorSurfaceKind::Floor,
+            Vec2{8, 8},
+            32.0F,
+            8.0F
+        );
+        expect(changed, "test displacement sculpt should change the floor");
+        const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(sectors);
+        expect(geometry.triangles.size() > 12, "displaced sector should render subdivided surface triangles");
+        bool found_raised_floor = false;
+        for (std::size_t i = 0; i < geometry.triangles.size(); ++i) {
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::Floor &&
+                (geometry.triangles[i].a.y > 0.0F || geometry.triangles[i].b.y > 0.0F || geometry.triangles[i].c.y > 0.0F)) {
+                found_raised_floor = true;
+            }
+        }
+        expect(found_raised_floor, "displaced floor should emit raised runtime vertices");
+    }
+
+    {
         std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
         sectors.front().floor_material = 2;
         sectors.front().ceiling_material = 3;
         sectors.front().wall_materials = {4, 5, 6, 7};
         const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(sectors);
-        expect(geometry.material_ids[0] == 2, "floor triangle should use floor material");
-        expect(geometry.material_ids[1] == 3, "ceiling triangle should use ceiling material");
-        expect(geometry.material_ids[4] == 4, "first wall should use first wall material");
-        expect(geometry.material_ids[6] == 5, "second wall should use second wall material");
-        expect(geometry.surfaces[0].kind == undecedent::RuntimeSurfaceKind::Floor, "floor should retain surface identity");
-        expect(geometry.surfaces[4].kind == undecedent::RuntimeSurfaceKind::Wall, "wall should retain surface identity");
-        expect(geometry.surfaces[4].index == 0, "wall should retain edge index");
+        bool found_floor = false;
+        bool found_ceiling = false;
+        bool found_first_wall = false;
+        bool found_second_wall = false;
+        for (std::size_t i = 0; i < geometry.surfaces.size(); ++i) {
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::Floor && geometry.material_ids[i] == 2) {
+                found_floor = true;
+            }
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::Ceiling && geometry.material_ids[i] == 3) {
+                found_ceiling = true;
+            }
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::Wall &&
+                geometry.surfaces[i].index == 0 && geometry.material_ids[i] == 4) {
+                found_first_wall = true;
+            }
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::Wall &&
+                geometry.surfaces[i].index == 1 && geometry.material_ids[i] == 5) {
+                found_second_wall = true;
+            }
+        }
+        expect(found_floor, "floor triangle should use floor material");
+        expect(found_ceiling, "ceiling triangle should use ceiling material");
+        expect(found_first_wall, "first wall should use first wall material");
+        expect(found_second_wall, "second wall should use second wall material");
     }
 
     {

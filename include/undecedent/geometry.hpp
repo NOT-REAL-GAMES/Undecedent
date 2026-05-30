@@ -28,6 +28,10 @@ struct Triangle {
 
 constexpr int kMaterialCount = 8;
 constexpr int kDefaultMaterialId = 0;
+constexpr int kDefaultDisplacementResolution = 4;
+constexpr int kMinDisplacementResolution = 1;
+constexpr int kMaxDisplacementResolution = 16;
+constexpr float kSectorMinHeight = 8.0F;
 
 inline int clamped_material_id(const int material_id) {
     if (material_id < 0 || material_id >= kMaterialCount) {
@@ -55,6 +59,17 @@ struct TriangulationResult {
     std::vector<Triangle> triangles;
 };
 
+struct SectorDisplacementSample {
+    Vec2 position;
+    float offset = 0.0F;
+};
+
+struct SectorSurfaceDisplacement {
+    bool enabled = false;
+    int resolution = kDefaultDisplacementResolution;
+    std::vector<SectorDisplacementSample> samples;
+};
+
 struct SectorPlane {
     PolygonLoop outer;
     std::vector<PolygonLoop> holes;
@@ -66,6 +81,8 @@ struct SectorPlane {
     int ceiling_material = kDefaultMaterialId;
     float floor_height = 0.0F;
     float height = 96.0F;
+    SectorSurfaceDisplacement floor_displacement;
+    SectorSurfaceDisplacement ceiling_displacement;
     TriangulationStatus status = TriangulationStatus::Ok;
     std::string status_message;
 };

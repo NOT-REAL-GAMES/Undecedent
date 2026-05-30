@@ -2,47 +2,37 @@ UNDECEDENT_MAP 1
 player_spawn -10.3128014 48 22.6521149 0
 point_lights 1
 point_light -0 64 0 1 0.860000014 0.620000005 384 1.5
-sectors 6
+sectors 4
 sector
 height 96
 floor 0
-outer 5
+outer 10
 v -192 0
 v -128 -128
 v 0 -192
 v 96 -128
-v 97.7978516 -44.5839844
-holes 0
-materials 7 7
-wall_materials 5 0 1 0 0 0
-hole_wall_materials 0
-endsector
-sector
-height 96
-floor 0
-outer 5
-v -192 0
-v 97.7978516 -44.5839844
+v 224 -96
+v 192 0
+v 128 128
 v 68.9228516 157.538086
 v 0 192
 v -128 128
 holes 0
 materials 7 7
-wall_materials 5 0 0 0 0 1
+wall_materials 10 0 1 0 0 1 0 0 0 0 1
 hole_wall_materials 0
 endsector
 sector
 height 96
 floor 0
-outer 5
-v 96 -128
+outer 4
 v 64 -288
 v 160 -416
 v 224 -96
-v 97.7978516 -44.5839844
+v 96 -128
 holes 0
 materials 7 7
-wall_materials 5 0 0 0 0 0
+wall_materials 4 0 0 0 0
 hole_wall_materials 0
 endsector
 sector
@@ -60,25 +50,11 @@ endsector
 sector
 height 96
 floor 0
-outer 5
-v 97.7978516 -44.5839844
-v 224 -96
-v 192 0
-v 128 128
-v 68.9228516 157.538086
-holes 0
-materials 7 7
-wall_materials 5 0 1 0 0 0
-hole_wall_materials 0
-endsector
-sector
-height 96
-floor 0
 outer 4
-v 160 -416
 v 128 -576
 v 384 -640
 v 416 -512
+v 160 -416
 holes 0
 materials 7 7
 wall_materials 4 0 0 0 0

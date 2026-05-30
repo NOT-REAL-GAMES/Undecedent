@@ -64,11 +64,12 @@ bool sample_fits_sector(
     const float feet,
     const float head
 ) {
-    if (feet < sector.floor_height - kPhysicsEpsilon ||
-        head > sector.floor_height + sector.height + kPhysicsEpsilon) {
+    if (!point_in_sector_2d(sector, sample)) {
         return false;
     }
-    return point_in_sector_2d(sector, sample);
+    const float floor = runtime_floor_height_at(sector, sample);
+    const float ceiling = runtime_ceiling_height_at(sector, sample);
+    return feet >= floor - kPhysicsEpsilon && head <= ceiling + kPhysicsEpsilon;
 }
 
 std::array<Vec2, 9> collision_samples(const Vec3 eye_position, const float radius) {
@@ -112,6 +113,68 @@ bool sample_fits_any_sector(
         }
     }
     return false;
+}
+
+bool sample_floor_height_any_sector(
+    const RuntimeWorld& world,
+    const std::vector<int>& candidates,
+    const Vec2 sample,
+    float& floor_height
+) {
+    bool found_floor = false;
+    auto visit = [&](const int sector_id) {
+        if (sector_id < 0 || sector_id >= static_cast<int>(world.sectors.size())) {
+            return;
+        }
+        const RuntimeSector& sector = world.sectors[static_cast<std::size_t>(sector_id)];
+        if (!point_in_sector_2d(sector, sample)) {
+            return;
+        }
+        const float sector_floor = runtime_floor_height_at(sector, sample);
+        if (!found_floor || sector_floor > floor_height) {
+            floor_height = sector_floor;
+            found_floor = true;
+        }
+    };
+
+    for (const int sector_id : candidates) {
+        visit(sector_id);
+    }
+    for (std::size_t sector_id = 0; sector_id < world.sectors.size(); ++sector_id) {
+        if (std::find(candidates.begin(), candidates.end(), static_cast<int>(sector_id)) != candidates.end()) {
+            continue;
+        }
+        visit(static_cast<int>(sector_id));
+    }
+    return found_floor;
+}
+
+bool support_floor_height(
+    const RuntimeWorld& world,
+    const Vec3 eye_position,
+    const PlayerPhysicsConfig config,
+    float& floor_height
+) {
+    const float radius = std::max(config.radius, 0.0F);
+    const RuntimeBounds2 bounds{
+        eye_position.x - radius,
+        eye_position.z - radius,
+        eye_position.x + radius,
+        eye_position.z + radius,
+    };
+    const std::vector<int> candidates = sectors_in_bounds(world, bounds);
+    bool found_floor = false;
+    for (const Vec2 sample : collision_samples(eye_position, radius)) {
+        float sample_floor = 0.0F;
+        if (!sample_floor_height_any_sector(world, candidates, sample, sample_floor)) {
+            return false;
+        }
+        if (!found_floor || sample_floor > floor_height) {
+            floor_height = sample_floor;
+            found_floor = true;
+        }
+    }
+    return found_floor;
 }
 
 PlayerPhysicsState state_for_position(
@@ -174,6 +237,24 @@ PlayerPhysicsState move_player(
         };
         if (player_fits_at(world, candidate, config)) {
             state.position = candidate;
+            return;
+        }
+
+        if (move_delta.y == 0.0F && (move_delta.x != 0.0F || move_delta.z != 0.0F)) {
+            float floor_height = 0.0F;
+            if (!support_floor_height(world, candidate, config, floor_height)) {
+                return;
+            }
+            const float height = std::max(config.height, 1.0F);
+            const float eye_height = std::clamp(config.eye_height, 0.0F, height);
+            const float current_feet = state.position.y - eye_height;
+            if (std::abs(floor_height - current_feet) > std::max(config.max_step_height, 0.0F) + kPhysicsEpsilon) {
+                return;
+            }
+            const Vec3 stepped{candidate.x, floor_height + eye_height, candidate.z};
+            if (player_fits_at(world, stepped, config)) {
+                state.position = stepped;
+            }
         }
     };
 

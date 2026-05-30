@@ -7,6 +7,7 @@
 #include <glad/glad.h>
 
 #include <algorithm>
+#include <iostream>
 #include <string>
 
 namespace undecedent {
@@ -27,6 +28,17 @@ bool entity_dropdown_rects(
     row_h = 30.0F;
     x = static_cast<float>(width) - w - 14.0F;
     y = 14.0F;
+    return true;
+}
+
+bool sculpt_button_rect(const int width, const int height, float& x, float& y, float& w, float& h) {
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    x = 14.0F;
+    y = 14.0F;
+    w = 112.0F;
+    h = 30.0F;
     return true;
 }
 
@@ -80,6 +92,93 @@ void draw_material_selector(const int active_material, const int width, const in
     glEnd();
 
     glLineWidth(1.0F);
+    glDisable(GL_BLEND);
+}
+
+bool handle_sculpt_button_click(
+    EditorWorld& editor_world,
+    const int width,
+    const int height,
+    const float mouse_x,
+    const float mouse_y
+) {
+    float x = 0.0F;
+    float y = 0.0F;
+    float w = 0.0F;
+    float h = 0.0F;
+    if (!sculpt_button_rect(width, height, x, y, w, h) || !point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
+        return false;
+    }
+    editor_world.displacement_sculpt_enabled = !editor_world.displacement_sculpt_enabled;
+    std::cout << "Displacement sculpt "
+              << (editor_world.displacement_sculpt_enabled ? "enabled" : "disabled") << '\n';
+    return true;
+}
+
+void draw_sculpt_button(
+    const EditorWorld& editor_world,
+    const int width,
+    const int height,
+    const float mouse_x,
+    const float mouse_y
+) {
+    float x = 0.0F;
+    float y = 0.0F;
+    float w = 0.0F;
+    float h = 0.0F;
+    if (!sculpt_button_rect(width, height, x, y, w, h)) {
+        return;
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBegin(GL_QUADS);
+    if (editor_world.displacement_sculpt_enabled) {
+        glColor4f(0.18F, 0.42F, 0.38F, 0.82F);
+    } else {
+        glColor4f(0.0F, 0.0F, 0.0F, 0.46F);
+    }
+    draw_screen_quad(x, y, w, h, width, height);
+    glEnd();
+
+    glLineWidth(1.5F);
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    draw_screen_line(x, y, x + w, y, width, height);
+    draw_screen_line(x + w, y, x + w, y + h, width, height);
+    draw_screen_line(x + w, y + h, x, y + h, width, height);
+    draw_screen_line(x, y + h, x, y, width, height);
+    draw_screen_line(x + 12.0F, y + 20.0F, x + 22.0F, y + 10.0F, width, height);
+    draw_screen_line(x + 22.0F, y + 10.0F, x + 32.0F, y + 20.0F, width, height);
+    draw_screen_line(x + 32.0F, y + 20.0F, x + 42.0F, y + 10.0F, width, height);
+    draw_stroke_text("SCULPT", x + 52.0F, y + 9.0F, 5.5F, width, height);
+    glEnd();
+    glLineWidth(1.0F);
+
+    if (point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
+        const std::string radius = "R " + format_world_units(editor_world.displacement_brush_radius) + "U";
+        const float tooltip_x = x;
+        const float tooltip_y = y + h + 8.0F;
+        const float tooltip_w = 178.0F;
+        const float tooltip_h = 44.0F;
+        glBegin(GL_QUADS);
+        glColor4f(0.0F, 0.0F, 0.0F, 0.72F);
+        draw_screen_quad(tooltip_x, tooltip_y, tooltip_w, tooltip_h, width, height);
+        glEnd();
+
+        glLineWidth(1.25F);
+        glBegin(GL_LINES);
+        glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+        draw_screen_line(tooltip_x, tooltip_y, tooltip_x + tooltip_w, tooltip_y, width, height);
+        draw_screen_line(tooltip_x + tooltip_w, tooltip_y, tooltip_x + tooltip_w, tooltip_y + tooltip_h, width, height);
+        draw_screen_line(tooltip_x + tooltip_w, tooltip_y + tooltip_h, tooltip_x, tooltip_y + tooltip_h, width, height);
+        draw_screen_line(tooltip_x, tooltip_y + tooltip_h, tooltip_x, tooltip_y, width, height);
+        draw_stroke_text("SCULPT DISPLACEMENT", tooltip_x + 8.0F, tooltip_y + 9.0F, 5.0F, width, height);
+        draw_stroke_text(radius, tooltip_x + 8.0F, tooltip_y + 26.0F, 5.0F, width, height);
+        glEnd();
+        glLineWidth(1.0F);
+    }
     glDisable(GL_BLEND);
 }
 

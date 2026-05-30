@@ -1,5 +1,6 @@
 #include "undecedent/map_io.hpp"
 
+#include "undecedent/displacement.hpp"
 #include "undecedent/triangulator.hpp"
 
 #include <algorithm>
@@ -13,7 +14,7 @@ namespace undecedent {
 namespace {
 
 constexpr const char* kMapMagic = "UNDECEDENT_MAP";
-constexpr int kMapVersion = 1;
+constexpr int kMapVersion = 2;
 
 SaveMapResult save_error(const std::string& message) {
     return SaveMapResult{false, message};
@@ -120,6 +121,12 @@ void normalize_materials(SectorPlane& sector) {
     }
 }
 
+void normalize_sector(SectorPlane& sector) {
+    normalize_materials(sector);
+    normalize_displacement(sector, SectorSurfaceKind::Floor);
+    normalize_displacement(sector, SectorSurfaceKind::Ceiling);
+}
+
 bool read_loop_after_label(std::istream& input, const char* label, PolygonLoop& loop, std::string& message) {
     std::size_t vertex_count = 0;
     if (!read_count(input, vertex_count, message)) {
@@ -206,7 +213,7 @@ LoadMapResult rebuild_loaded_sectors(
         sector.status = result.status;
         sector.status_message = result.message;
         sector.triangles = result.triangles;
-        normalize_materials(sector);
+        normalize_sector(sector);
         if (result.status != TriangulationStatus::Ok) {
             std::ostringstream stream;
             stream << "Sector " << i << " failed triangulation: " << result.message;
@@ -218,8 +225,27 @@ LoadMapResult rebuild_loaded_sectors(
     return LoadMapResult{true, "Loaded map.", std::move(sectors), player_spawn, std::move(point_lights)};
 }
 
+void write_displacement(
+    std::ostream& output,
+    const char* label,
+    const SectorSurfaceDisplacement& displacement
+) {
+    if (!displacement.enabled || displacement.samples.empty()) {
+        return;
+    }
+    output << "surface_displacement " << label << ' '
+           << clamped_displacement_resolution(displacement.resolution) << ' '
+           << displacement.samples.size() << '\n';
+    for (const SectorDisplacementSample& sample : displacement.samples) {
+        output << "surface_displacement_sample "
+               << sample.position.x << ' '
+               << sample.position.y << ' '
+               << sample.offset << '\n';
+    }
+}
+
 void write_materials(std::ostream& output, SectorPlane sector) {
-    normalize_materials(sector);
+    normalize_sector(sector);
     output << "materials " << sector.floor_material << ' ' << sector.ceiling_material << '\n';
     output << "wall_materials " << sector.wall_materials.size();
     for (const int material : sector.wall_materials) {
@@ -234,6 +260,51 @@ void write_materials(std::ostream& output, SectorPlane sector) {
         }
         output << '\n';
     }
+}
+
+bool read_displacement(
+    std::istream& input,
+    SectorPlane& sector,
+    std::string& message
+) {
+    std::string surface;
+    int resolution = 0;
+    std::size_t count = 0;
+    if (!(input >> surface >> resolution)) {
+        message = "Expected displacement surface and resolution.";
+        return false;
+    }
+    if (!read_count(input, count, message)) {
+        return false;
+    }
+    SectorSurfaceKind kind{};
+    if (surface == "floor") {
+        kind = SectorSurfaceKind::Floor;
+    } else if (surface == "ceiling") {
+        kind = SectorSurfaceKind::Ceiling;
+    } else {
+        message = "Expected displacement surface 'floor' or 'ceiling'.";
+        return false;
+    }
+
+    SectorSurfaceDisplacement& displacement = displacement_for_surface(sector, kind);
+    displacement.enabled = true;
+    displacement.resolution = clamped_displacement_resolution(resolution);
+    displacement.samples.clear();
+    displacement.samples.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!read_expected(input, "surface_displacement_sample", message)) {
+            return false;
+        }
+        SectorDisplacementSample sample;
+        if (!read_float(input, sample.position.x, message) ||
+            !read_float(input, sample.position.y, message) ||
+            !read_float(input, sample.offset, message)) {
+            return false;
+        }
+        displacement.samples.push_back(sample);
+    }
+    return true;
 }
 
 void write_loop(std::ostream& output, const char* label, const PolygonLoop& loop) {
@@ -303,6 +374,8 @@ SaveMapResult save_map_file(
             write_loop(output, "hole", hole);
         }
         write_materials(output, sector);
+        write_displacement(output, "floor", sector.floor_displacement);
+        write_displacement(output, "ceiling", sector.ceiling_displacement);
         output << "endsector\n";
     }
 
@@ -332,7 +405,7 @@ LoadMapResult load_map_file(const std::filesystem::path& path) {
         return load_error("Unsupported map magic: " + magic);
     }
 
-    if (version != kMapVersion) {
+    if (version < 1 || version > kMapVersion) {
         return load_error("Unsupported map version.");
     }
 
@@ -463,10 +536,19 @@ LoadMapResult load_map_file(const std::filesystem::path& path) {
         }
 
         std::string token;
-        if (!(input >> token)) {
-            return load_error("Expected material fields or 'endsector'.");
-        }
-        if (token == "materials") {
+        bool read_material_block = false;
+        while (true) {
+            if (!(input >> token)) {
+                return load_error("Expected material/displacement fields or 'endsector'.");
+            }
+            if (token == "endsector") {
+                break;
+            }
+            if (token == "materials") {
+                if (read_material_block) {
+                    return load_error("Duplicate materials block.");
+                }
+                read_material_block = true;
             if (!read_material_id(input, sector.floor_material, message) ||
                 !read_material_id(input, sector.ceiling_material, message)) {
                 return load_error(message);
@@ -501,11 +583,15 @@ LoadMapResult load_map_file(const std::filesystem::path& path) {
                     return load_error(message);
                 }
             }
-            if (!read_expected(input, "endsector", message)) {
-                return load_error(message);
+                continue;
             }
-        } else if (token != "endsector") {
-            return load_error("Expected material fields or 'endsector' but found '" + token + "'.");
+            if (token == "surface_displacement") {
+                if (!read_displacement(input, sector, message)) {
+                    return load_error(message);
+                }
+                continue;
+            }
+            return load_error("Expected material/displacement fields or 'endsector' but found '" + token + "'.");
         }
 
         normalize_materials(sector);

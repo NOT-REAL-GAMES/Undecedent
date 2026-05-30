@@ -1,4 +1,5 @@
 #include "undecedent/csg.hpp"
+#include "undecedent/displacement.hpp"
 #include "undecedent/runtime_render.hpp"
 #include "undecedent/runtime_visibility.hpp"
 #include "undecedent/runtime_world.hpp"
@@ -120,6 +121,23 @@ int main() {
         expect(undecedent::sector_at_point(world, Vec3{5, 20, 5}) == 0, "point lookup should find elevated sector volume");
         expect(undecedent::sector_at_point(world, Vec3{5, 8, 5}) == -1, "point lookup should reject point below floor");
         expect(undecedent::sector_at_point(world, Vec3{5, 64, 5}) == -1, "point lookup should reject point above ceiling");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {16, 0}, {16, 16}, {0, 16}}));
+        sectors.front().floor_displacement.resolution = 2;
+        undecedent::sculpt_surface_displacement(
+            sectors.front(),
+            undecedent::SectorSurfaceKind::Floor,
+            Vec2{8, 8},
+            32.0F,
+            8.0F
+        );
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const float floor = undecedent::runtime_floor_height_at(world.sectors.front(), Vec2{8, 8});
+        expect(floor > 0.0F, "runtime world should sample displaced floor height");
+        expect(undecedent::sector_at_point(world, Vec3{8, floor + 1.0F, 8}) == 0,
+            "point lookup should use displaced floor height");
     }
 
     {
@@ -271,12 +289,24 @@ int main() {
         sectors.front().ceiling_material = 6;
         sectors.front().wall_materials = {1, 2, 3, 4};
         const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
-        expect(world.triangles[0].material_id == 5, "runtime floor should retain material id");
-        expect(world.triangles[1].material_id == 6, "runtime ceiling should retain material id");
-        expect(world.triangles[4].material_id == 1, "runtime wall should retain material id");
-        expect(world.triangles[4].surface.kind == undecedent::RuntimeSurfaceKind::Wall,
-            "runtime wall should retain surface kind");
-        expect(world.triangles[4].surface.index == 0, "runtime wall should retain edge index");
+        bool found_floor = false;
+        bool found_ceiling = false;
+        bool found_wall = false;
+        for (const undecedent::RuntimeTaggedTriangle& triangle : world.triangles) {
+            if (triangle.surface.kind == undecedent::RuntimeSurfaceKind::Floor && triangle.material_id == 5) {
+                found_floor = true;
+            }
+            if (triangle.surface.kind == undecedent::RuntimeSurfaceKind::Ceiling && triangle.material_id == 6) {
+                found_ceiling = true;
+            }
+            if (triangle.surface.kind == undecedent::RuntimeSurfaceKind::Wall &&
+                triangle.surface.index == 0 && triangle.material_id == 1) {
+                found_wall = true;
+            }
+        }
+        expect(found_floor, "runtime floor should retain material id");
+        expect(found_ceiling, "runtime ceiling should retain material id");
+        expect(found_wall, "runtime wall should retain material id and surface identity");
     }
 
     return EXIT_SUCCESS;

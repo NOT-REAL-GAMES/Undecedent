@@ -1,6 +1,7 @@
 #include "undecedent/editor.hpp"
 
 #include "undecedent/csg.hpp"
+#include "undecedent/displacement.hpp"
 #include "undecedent/editor_slice.hpp"
 #include "undecedent/screen_draw.hpp"
 #include "undecedent/triangulator.hpp"
@@ -26,7 +27,6 @@ constexpr float kEditorScrollDeadzone = 0.02F;
 constexpr float kEditorScrollLogStrength = 4.0F;
 constexpr float kEditorMaxScrollDelta = 64.0F;
 constexpr float kEditorCameraSmoothRate = 14.0F;
-constexpr float kSectorMinHeight = 8.0F;
 constexpr float kCloseVertexPixels = 12.0F;
 constexpr std::size_t kEditorHistoryLimit = 128;
 
@@ -136,6 +136,104 @@ bool same_editor_point(const Vec2 a, const Vec2 b) {
     return distance_squared(a, b) <= (kGeometryEpsilon * kGeometryEpsilon);
 }
 
+namespace {
+
+bool dragged_ref_matches(
+    const std::vector<CommittedVertexRef>& dragged_refs,
+    const std::size_t sector_index,
+    const std::size_t vertex_index
+) {
+    return std::any_of(
+        dragged_refs.begin(),
+        dragged_refs.end(),
+        [sector_index, vertex_index](const CommittedVertexRef ref) {
+            return ref.sector == sector_index && ref.vertex == vertex_index;
+        }
+    );
+}
+
+bool collapse_duplicate_outer_vertices(
+    SectorPlane& sector,
+    const std::size_t sector_index,
+    const std::vector<CommittedVertexRef>& dragged_refs
+) {
+    const std::size_t vertex_count = sector.outer.vertices.size();
+    if (vertex_count < 2) {
+        return false;
+    }
+
+    std::vector<bool> keep(vertex_count, true);
+    bool changed = false;
+    for (std::size_t i = 0; i < vertex_count; ++i) {
+        if (!keep[i]) {
+            continue;
+        }
+
+        std::vector<std::size_t> duplicate_group{i};
+        for (std::size_t j = i + 1; j < vertex_count; ++j) {
+            if (keep[j] && same_editor_point(sector.outer.vertices[i], sector.outer.vertices[j])) {
+                duplicate_group.push_back(j);
+            }
+        }
+
+        if (duplicate_group.size() <= 1) {
+            continue;
+        }
+
+        std::size_t kept_index = duplicate_group.front();
+        for (const std::size_t index : duplicate_group) {
+            if (!dragged_ref_matches(dragged_refs, sector_index, index)) {
+                kept_index = index;
+                break;
+            }
+        }
+
+        for (const std::size_t index : duplicate_group) {
+            if (index != kept_index) {
+                keep[index] = false;
+                changed = true;
+            }
+        }
+    }
+
+    if (!changed) {
+        return false;
+    }
+
+    PolygonLoop welded_outer;
+    std::vector<int> welded_wall_materials;
+    welded_outer.vertices.reserve(vertex_count);
+    welded_wall_materials.reserve(vertex_count);
+    for (std::size_t i = 0; i < vertex_count; ++i) {
+        if (!keep[i]) {
+            continue;
+        }
+        welded_outer.vertices.push_back(sector.outer.vertices[i]);
+        welded_wall_materials.push_back(
+            i < sector.wall_materials.size() ? sector.wall_materials[i] : kDefaultMaterialId
+        );
+    }
+
+    sector.outer = std::move(welded_outer);
+    sector.wall_materials = std::move(welded_wall_materials);
+    return true;
+}
+
+int collapse_drag_duplicate_vertices(EditorWorld& editor_world) {
+    int collapsed_vertices = 0;
+    for (std::size_t sector_index = 0; sector_index < editor_world.sectors.size(); ++sector_index) {
+        SectorPlane& sector = editor_world.sectors[sector_index];
+        const std::size_t before = sector.outer.vertices.size();
+        if (collapse_duplicate_outer_vertices(sector, sector_index, editor_world.dragged_committed_refs)) {
+            const std::size_t after = sector.outer.vertices.size();
+            collapsed_vertices += static_cast<int>(before - after);
+        }
+    }
+    return collapsed_vertices;
+}
+
+} // namespace
+
 bool is_sector_selected(const EditorWorld& editor_world, const int sector_index) {
     return editor_world.selected_sectors.contains(sector_index);
 }
@@ -176,6 +274,12 @@ std::vector<int> selected_sector_indices(const EditorWorld& editor_world) {
 }
 
 bool sector_visible_in_slice(const EditorWorld& editor_world, const SectorPlane& sector) {
+    const SurfaceHeightRange floor_range = sector_surface_height_range(sector, SectorSurfaceKind::Floor);
+    const SurfaceHeightRange ceiling_range = sector_surface_height_range(sector, SectorSurfaceKind::Ceiling);
+    if (editor_world.slice_z >= floor_range.min_height - kGeometryEpsilon &&
+        editor_world.slice_z <= ceiling_range.max_height + kGeometryEpsilon) {
+        return true;
+    }
     return sector_intersects_z_slice(sector, editor_world.slice_z);
 }
 
@@ -585,6 +689,45 @@ bool apply_material_to_surface(EditorWorld& editor_world, const SurfacePick& pic
     return true;
 }
 
+bool sculpt_displacement_at_pick(EditorWorld& editor_world, const SurfacePick& pick, const float delta) {
+    if (!pick.hit || pick.sector_id < 0 || pick.sector_id >= static_cast<int>(editor_world.sectors.size())) {
+        return false;
+    }
+    SectorSurfaceKind surface{};
+    if (pick.surface.kind == RuntimeSurfaceKind::Floor) {
+        surface = SectorSurfaceKind::Floor;
+    } else if (pick.surface.kind == RuntimeSurfaceKind::Ceiling) {
+        surface = SectorSurfaceKind::Ceiling;
+    } else {
+        return false;
+    }
+
+    SectorPlane& sector = editor_world.sectors[static_cast<std::size_t>(pick.sector_id)];
+    push_undo_snapshot(editor_world, "sculpt displacement");
+    const bool changed = sculpt_surface_displacement(
+        sector,
+        surface,
+        Vec2{pick.point.x, pick.point.z},
+        editor_world.displacement_brush_radius,
+        delta
+    );
+    if (!changed) {
+        editor_world.undo_stack.pop_back();
+        return false;
+    }
+    rebuild_runtime_geometry(editor_world);
+    clear_selection_outside_slice(editor_world);
+    return true;
+}
+
+void adjust_displacement_brush_radius(EditorWorld& editor_world, const float delta) {
+    editor_world.displacement_brush_radius =
+        std::clamp(editor_world.displacement_brush_radius + delta, 4.0F, 512.0F);
+    std::cout << "Displacement brush radius: "
+              << format_world_units(editor_world.displacement_brush_radius)
+              << "u\n";
+}
+
 TriangulationResult draft_preview_result(const EditorWorld& editor_world) {
     if (editor_world.plane_tool == PlaneToolMode::None) {
         return {};
@@ -961,6 +1104,7 @@ void finish_committed_vertex_drag(EditorWorld& editor_world) {
     }
 
     if (editor_world.dragged_committed_vertex_moved) {
+        const int welded_vertices = collapse_drag_duplicate_vertices(editor_world);
         const CsgAddResult rebuild_result = csg_rebuild_sectors(editor_world.sectors);
         if (rebuild_result.ok) {
             EditorHistorySnapshot snapshot = make_history_snapshot(editor_world);
@@ -970,6 +1114,9 @@ void finish_committed_vertex_drag(EditorWorld& editor_world) {
             select_single_sector(editor_world, editor_world.selected_sector);
             clear_selection_outside_slice(editor_world);
             rebuild_runtime_geometry(editor_world);
+            if (welded_vertices > 0) {
+                std::cout << "Merged " << welded_vertices << " duplicate vertices after drag.\n";
+            }
             std::cout << "Rebuilt sector topology after vertex move; sectors: " << editor_world.sectors.size() << '\n';
         } else {
             editor_world.sectors = editor_world.committed_drag_snapshot;

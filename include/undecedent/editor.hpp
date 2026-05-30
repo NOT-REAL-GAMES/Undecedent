@@ -80,6 +80,8 @@ struct EditorWorld {
     EntityPlacementType entity_placement = EntityPlacementType::PlayerSpawn;
     PlaneToolMode plane_tool = PlaneToolMode::None;
     bool entity_dropdown_open = false;
+    bool displacement_sculpt_enabled = false;
+    float displacement_brush_radius = 64.0F;
     bool has_hovered_committed_vertex = false;
     bool has_dragged_committed_vertex = false;
     bool dragged_draft_vertex_moved = false;
@@ -169,6 +171,8 @@ void place_entity_at_origin(
 const char* entity_placement_label(EntityPlacementType type);
 void normalize_sector_materials(SectorPlane& sector);
 bool apply_material_to_surface(EditorWorld& editor_world, const SurfacePick& pick, int material_id);
+bool sculpt_displacement_at_pick(EditorWorld& editor_world, const SurfacePick& pick, float delta);
+void adjust_displacement_brush_radius(EditorWorld& editor_world, float delta);
 
 TriangulationResult draft_preview_result(const EditorWorld& editor_world);
 void refresh_draft(EditorWorld& editor_world);

@@ -1,0 +1,148 @@
+UNDECEDENT_MAP 2
+player_spawn -10.3128014 48 22.6521149 0
+point_lights 1
+point_light -0 64 0 1 0.860000014 0.620000005 384 1.5
+sectors 4
+sector
+height 96
+floor 0
+outer 10
+v -192 0
+v -128 -128
+v 0 -192
+v 96 -128
+v 224 -96
+v 192 0
+v 128 128
+v 68.9228516 157.538086
+v 0 192
+v -128 128
+holes 0
+materials 7 7
+wall_materials 10 0 1 0 0 1 0 0 0 0 1
+hole_wall_materials 0
+surface_displacement floor 4 85
+surface_displacement_sample -192 0 0
+surface_displacement_sample -176 -32 0
+surface_displacement_sample -176 32 0
+surface_displacement_sample -160 -64 0
+surface_displacement_sample -160 0 0
+surface_displacement_sample -160 64 0
+surface_displacement_sample -144 -96 0
+surface_displacement_sample -144 -32 0
+surface_displacement_sample -144 32 0
+surface_displacement_sample -144 96 0.658160627
+surface_displacement_sample -128 -128 0
+surface_displacement_sample -128 -64 0.697008371
+surface_displacement_sample -128 0 0
+surface_displacement_sample -128 64 0
+surface_displacement_sample -128 128 3.87105751
+surface_displacement_sample -96 -144 0
+surface_displacement_sample -96 -80 10.7576609
+surface_displacement_sample -96 -16 7.21951103
+surface_displacement_sample -96 48 0
+surface_displacement_sample -96 144 7.97539282
+surface_displacement_sample -78.7692871 135.384521 10.0727215
+surface_displacement_sample -72 64 1.2528311
+surface_displacement_sample -64 -160 0
+surface_displacement_sample -64 -96 12.2004004
+surface_displacement_sample -64 -32 38.4145088
+surface_displacement_sample -64 128 9.45316124
+surface_displacement_sample -64 160 4.27334642
+surface_displacement_sample -48 96 4.46861649
+surface_displacement_sample -46.7692871 151.384521 3.63891935
+surface_displacement_sample -40 -16 45.126297
+surface_displacement_sample -40 72 -0.320100069
+surface_displacement_sample -32 -176 0.0523956418
+surface_displacement_sample -32 -112 8.30283165
+surface_displacement_sample -32 176 0.518973947
+surface_displacement_sample -29.5385742 142.769043 2.14075112
+surface_displacement_sample -16 0 27.5733738
+surface_displacement_sample -14.7692871 135.384521 2.35528994
+surface_displacement_sample -14.7692871 167.384521 1.88804042
+surface_displacement_sample -8 -96 26.9220905
+surface_displacement_sample 0 -192 0.0220110007
+surface_displacement_sample 0 128 5.99903631
+surface_displacement_sample 0 192 1.4866817
+surface_displacement_sample 2.46142578 158.769043 6.6770668
+surface_displacement_sample 16 -80 34.7843704
+surface_displacement_sample 16 8 4.79866886
+surface_displacement_sample 16 96 4.54185772
+surface_displacement_sample 17.2307129 183.384521 4.67836952
+surface_displacement_sample 19.6921387 150.153564 13.9176054
+surface_displacement_sample 24 -176 0.959314704
+surface_displacement_sample 32 64 0.477181107
+surface_displacement_sample 34.4614258 142.769043 16.0138054
+surface_displacement_sample 34.4614258 174.769043 10.065814
+surface_displacement_sample 40 -64 19.8024654
+surface_displacement_sample 40 40 0.713154793
+surface_displacement_sample 48 -160 0.972593188
+surface_displacement_sample 48 16 1.28040457
+surface_displacement_sample 49.2307129 135.384521 15.3453178
+surface_displacement_sample 51.6921387 166.153564 10.8398886
+surface_displacement_sample 64 128 8.20187664
+surface_displacement_sample 68.9228516 157.538086 7.3995018
+surface_displacement_sample 72 -144 0
+surface_displacement_sample 72 -56 0
+surface_displacement_sample 80 96 -0.0514427796
+surface_displacement_sample 83.6921387 150.153564 2.5574472
+surface_displacement_sample 96 -128 0
+surface_displacement_sample 96 64 8.65559959
+surface_displacement_sample 98.4614258 142.769043 -1.76512146
+surface_displacement_sample 104 -48 0.577462077
+surface_displacement_sample 112 32 17.2003994
+surface_displacement_sample 113.230713 135.384521 -4.10012817
+surface_displacement_sample 120 8 15.6762028
+surface_displacement_sample 128 -120 0
+surface_displacement_sample 128 -16 6.91771412
+surface_displacement_sample 128 128 -2.61982846
+surface_displacement_sample 136 -40 1.0008353
+surface_displacement_sample 144 96 0
+surface_displacement_sample 160 -112 0
+surface_displacement_sample 160 64 0
+surface_displacement_sample 176 32 0
+surface_displacement_sample 192 -104 0
+surface_displacement_sample 192 0 0
+surface_displacement_sample 200 -24 0
+surface_displacement_sample 208 -48 0
+surface_displacement_sample 216 -72 0
+surface_displacement_sample 224 -96 0
+endsector
+sector
+height 96
+floor 0
+outer 4
+v 64 -288
+v 160 -416
+v 224 -96
+v 96 -128
+holes 0
+materials 7 7
+wall_materials 4 0 0 0 0
+hole_wall_materials 0
+endsector
+sector
+height 96
+floor 0
+outer 3
+v 64 -288
+v 128 -576
+v 160 -416
+holes 0
+materials 7 7
+wall_materials 3 0 0 0
+hole_wall_materials 0
+endsector
+sector
+height 96
+floor 0
+outer 4
+v 128 -576
+v 384 -640
+v 416 -512
+v 160 -416
+holes 0
+materials 7 7
+wall_materials 4 0 0 0 0
+hole_wall_materials 0
+endsector

@@ -48,6 +48,7 @@ using undecedent::draw_runtime_world;
 using undecedent::draw_stroke_text;
 using undecedent::draw_entity_dropdown;
 using undecedent::draw_material_selector;
+using undecedent::draw_sculpt_button;
 using undecedent::screen_to_ndc_x;
 using undecedent::screen_to_ndc_y;
 using undecedent::configure_gl_attributes;
@@ -57,6 +58,7 @@ using undecedent::add_vec3;
 using undecedent::mul_vec3;
 using undecedent::adjust_selected_sector_floor_heights;
 using undecedent::adjust_selected_sector_heights;
+using undecedent::adjust_displacement_brush_radius;
 using undecedent::apply_editor_scroll_zoom;
 using undecedent::apply_editor_slice_scroll;
 using undecedent::apply_material_to_surface;
@@ -81,6 +83,7 @@ using undecedent::GameCamera;
 using undecedent::GameControlConfig;
 using undecedent::GameRenderConfig;
 using undecedent::handle_entity_dropdown_click;
+using undecedent::handle_sculpt_button_click;
 using undecedent::is_dragged_committed_ref;
 using undecedent::is_sector_selected;
 using undecedent::matching_committed_vertices;
@@ -101,6 +104,7 @@ using undecedent::screen_to_world_y;
 using undecedent::sector_at_point;
 using undecedent::sector_visible_in_slice;
 using undecedent::select_single_sector;
+using undecedent::sculpt_displacement_at_pick;
 using undecedent::start_hole_plane;
 using undecedent::start_knife_tool;
 using undecedent::start_outer_plane;
@@ -830,6 +834,17 @@ int main() {
                     }
                 }
 
+                if (editor_3d && !event.key.repeat && editor_world.displacement_sculpt_enabled) {
+                    if (key == SDLK_LEFTBRACKET || scancode == SDL_SCANCODE_LEFTBRACKET) {
+                        adjust_displacement_brush_radius(editor_world, -8.0F);
+                        continue;
+                    }
+                    if (key == SDLK_RIGHTBRACKET || scancode == SDL_SCANCODE_RIGHTBRACKET) {
+                        adjust_displacement_brush_radius(editor_world, 8.0F);
+                        continue;
+                    }
+                }
+
                 if (key == SDLK_ESCAPE || key == SDLK_Q) {
                     running = false;
                 }
@@ -942,6 +957,9 @@ int main() {
                 int width = 0;
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
+                if (handle_sculpt_button_click(editor_world, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
@@ -952,6 +970,9 @@ int main() {
                 int width = 0;
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
+                if (handle_sculpt_button_click(editor_world, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
@@ -971,6 +992,12 @@ int main() {
                     event.button.y,
                     game_render_config
                 );
+                if (editor_world.displacement_sculpt_enabled) {
+                    if (event.button.button == SDL_BUTTON_LEFT && pick.hit) {
+                        select_single_sector(editor_world, pick.sector_id);
+                    }
+                    continue;
+                }
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     const bool shift_select = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
                     if (!shift_select && pick.hit) {
@@ -1008,6 +1035,34 @@ int main() {
                     }
                     continue;
                 }
+            }
+
+            if (app_mode == AppMode::Editor3D && event.type == SDL_EVENT_MOUSE_WHEEL &&
+                editor_world.displacement_sculpt_enabled) {
+                int width = 0;
+                int height = 0;
+                SDL_GetWindowSizeInPixels(window, &width, &height);
+
+                float scroll_y = event.wheel.y;
+                if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+                    scroll_y *= -1.0F;
+                }
+
+                const SurfacePick pick = pick_runtime_surface(
+                    editor_world.runtime_world,
+                    game_camera,
+                    width,
+                    height,
+                    event.wheel.mouse_x,
+                    event.wheel.mouse_y,
+                    game_render_config
+                );
+                const bool shift_down = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+                const float delta = scroll_y * (shift_down ? 1.0F : kSectorHeightStep);
+                if (sculpt_displacement_at_pick(editor_world, pick, delta)) {
+                    std::cout << "Sculpted displacement at sector " << pick.sector_id << '\n';
+                }
+                continue;
             }
 
             if (!is_2d_editor_mode(app_mode)) {
@@ -1328,6 +1383,10 @@ int main() {
             glLoadIdentity();
             glMatrixMode(GL_MODELVIEW);
             glLoadIdentity();
+            float mouse_x = 0.0F;
+            float mouse_y = 0.0F;
+            SDL_GetMouseState(&mouse_x, &mouse_y);
+            draw_sculpt_button(editor_world, width, height, mouse_x, mouse_y);
             draw_entity_dropdown(editor_world, width, height);
         }
         overlay_ms = ticks_to_ms(overlay_start_ticks, SDL_GetTicksNS());
