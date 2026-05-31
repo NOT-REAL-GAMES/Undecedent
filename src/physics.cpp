@@ -72,6 +72,18 @@ bool sample_fits_sector(
     return feet >= floor - kPhysicsEpsilon && head <= ceiling + kPhysicsEpsilon;
 }
 
+bool sample_has_body_clearance(
+    const RuntimeSector& sector,
+    const Vec2 sample,
+    const float head
+) {
+    if (!point_in_sector_2d(sector, sample)) {
+        return false;
+    }
+    const float ceiling = runtime_ceiling_height_at(sector, sample);
+    return head <= ceiling + kPhysicsEpsilon;
+}
+
 std::array<Vec2, 9> collision_samples(const Vec3 eye_position, const float radius) {
     constexpr float diagonal = 0.70710678118F;
     const Vec2 center{eye_position.x, eye_position.z};
@@ -115,6 +127,32 @@ bool sample_fits_any_sector(
     return false;
 }
 
+bool sample_has_body_clearance_any_sector(
+    const RuntimeWorld& world,
+    const std::vector<int>& candidates,
+    const Vec2 sample,
+    const float head
+) {
+    for (const int sector_id : candidates) {
+        if (sector_id < 0 || sector_id >= static_cast<int>(world.sectors.size())) {
+            continue;
+        }
+        if (sample_has_body_clearance(world.sectors[static_cast<std::size_t>(sector_id)], sample, head)) {
+            return true;
+        }
+    }
+
+    for (std::size_t sector_id = 0; sector_id < world.sectors.size(); ++sector_id) {
+        if (std::find(candidates.begin(), candidates.end(), static_cast<int>(sector_id)) != candidates.end()) {
+            continue;
+        }
+        if (sample_has_body_clearance(world.sectors[sector_id], sample, head)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool sample_floor_height_any_sector(
     const RuntimeWorld& world,
     const std::vector<int>& candidates,
@@ -149,13 +187,18 @@ bool sample_floor_height_any_sector(
     return found_floor;
 }
 
+float foot_contact_radius_for_config(const PlayerPhysicsConfig config) {
+    const float radius = std::max(config.radius, 0.0F);
+    return std::clamp(config.foot_contact_radius, 0.0F, radius);
+}
+
 bool support_floor_height(
     const RuntimeWorld& world,
     const Vec3 eye_position,
     const PlayerPhysicsConfig config,
     float& floor_height
 ) {
-    const float radius = std::max(config.radius, 0.0F);
+    const float radius = foot_contact_radius_for_config(config);
     const RuntimeBounds2 bounds{
         eye_position.x - radius,
         eye_position.z - radius,
@@ -212,6 +255,13 @@ bool player_fits_at(const RuntimeWorld& world, const Vec3 eye_position, const Pl
     const std::vector<int> candidates = sectors_in_bounds(world, bounds);
 
     for (const Vec2 sample : collision_samples(eye_position, radius)) {
+        if (!sample_has_body_clearance_any_sector(world, candidates, sample, head)) {
+            return false;
+        }
+    }
+
+    const float foot_radius = foot_contact_radius_for_config(config);
+    for (const Vec2 sample : collision_samples(eye_position, foot_radius)) {
         if (!sample_fits_any_sector(world, candidates, sample, feet, head)) {
             return false;
         }

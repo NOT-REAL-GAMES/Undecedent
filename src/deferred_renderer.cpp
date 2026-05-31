@@ -1,5 +1,7 @@
 #include "undecedent/deferred_renderer.hpp"
 
+#include "undecedent/shadow_atlas.hpp"
+
 #include <cstddef>
 #include <iomanip>
 #include <iostream>
@@ -140,29 +142,125 @@ void main() {
 )";
 
     static constexpr const char* lighting_vertex = R"(
-#version 120
+#version 430 compatibility
 void main() {
     gl_Position = gl_Vertex;
 }
 )";
 
     static constexpr const char* lighting_fragment = R"(
-#version 120
+#version 430 compatibility
 uniform sampler2D uPosition;
 uniform sampler2D uNormal;
 uniform sampler2D uAlbedo;
 uniform sampler2D uMaterial;
+uniform sampler2D uPointShadowAtlas;
+uniform sampler2D uSunShadowMoments;
 uniform vec2 uInvViewport;
 uniform vec3 uCameraPosition;
 uniform vec3 uAmbientColor;
 uniform int uLightCount;
-uniform vec3 uLightPositions[32];
-uniform vec3 uLightColors[32];
-uniform float uLightRadii[32];
-uniform float uLightIntensities[32];
+uniform bool uPointShadowsEnabled;
+uniform bool uSunEnabled;
+uniform bool uSunShadowEnabled;
+uniform vec3 uSunDirection;
+uniform vec3 uSunColor;
+uniform float uSunIntensity;
+uniform mat4 uSunShadowMatrix;
+const int MAX_POINT_LIGHTS = 4096;
+const int POINT_SHADOW_FACE_COUNT = 6;
+struct PointLightRecord {
+    vec4 position_radius;
+    vec4 color_intensity;
+    vec4 shadow_flags;
+};
+struct PointShadowFaceRecord {
+    vec4 rect;
+    mat4 matrix;
+};
+layout(std430, binding = 0) readonly buffer PointLightBuffer {
+    PointLightRecord uPointLights[];
+};
+layout(std430, binding = 1) readonly buffer PointShadowFaceBuffer {
+    PointShadowFaceRecord uPointShadowFaces[];
+};
 const float PI = 3.14159265358979323846;
 float saturate(float value) {
     return clamp(value, 0.0, 1.0);
+}
+const float EVSM_EXPONENT = 8.0;
+const float EVSM_DEPTH_BIAS = 0.004;
+float evsm_depth(float depth) {
+    return exp(EVSM_EXPONENT * (clamp(depth, 0.0, 1.0) - 1.0));
+}
+float reduce_light_bleeding(float p_max) {
+    const float amount = 0.45;
+    return clamp((p_max - amount) / (1.0 - amount), 0.0, 1.0);
+}
+float evsm_visibility(vec2 moments, float receiver_depth) {
+    const float receiver = evsm_depth(receiver_depth - EVSM_DEPTH_BIAS);
+    if (receiver <= moments.x) {
+        return 1.0;
+    }
+    float variance = max(moments.y - (moments.x * moments.x), 0.00002);
+    float d = receiver - moments.x;
+    float p_max = variance / (variance + (d * d));
+    return reduce_light_bleeding(p_max);
+}
+float point_shadow_visibility(int light_index, vec3 light_vector, float light_distance, float range) {
+    if (!uPointShadowsEnabled || uPointLights[light_index].shadow_flags.x < 0.5 || range <= 1.0) {
+        return 1.0;
+    }
+    vec3 light_to_fragment = -light_vector;
+    vec3 abs_vector = abs(light_to_fragment);
+    int face = 0;
+    if (abs_vector.x >= abs_vector.y && abs_vector.x >= abs_vector.z) {
+        face = light_to_fragment.x >= 0.0 ? 0 : 1;
+    } else if (abs_vector.y >= abs_vector.x && abs_vector.y >= abs_vector.z) {
+        face = light_to_fragment.y >= 0.0 ? 2 : 3;
+    } else {
+        face = light_to_fragment.z >= 0.0 ? 4 : 5;
+    }
+    int shadow_index = (light_index * POINT_SHADOW_FACE_COUNT) + face;
+    vec3 light_position = uPointLights[light_index].position_radius.xyz;
+    vec4 clip = uPointShadowFaces[shadow_index].matrix * vec4(light_position + light_to_fragment, 1.0);
+    vec3 projected = (clip.xyz / clip.w) * 0.5 + 0.5;
+    if (projected.x < 0.0 || projected.x > 1.0 ||
+        projected.y < 0.0 || projected.y > 1.0 ||
+        projected.z < 0.0 || projected.z > 1.0) {
+        return 1.0;
+    }
+    float receiver_depth = clamp(light_distance / range, 0.0, 1.0);
+    vec4 rect = uPointShadowFaces[shadow_index].rect;
+    vec2 atlas_uv = rect.xy + (projected.xy * rect.zw);
+    vec2 moments = texture(uPointShadowAtlas, atlas_uv).rg;
+    return evsm_visibility(moments, receiver_depth);
+}
+float sun_shadow_visibility(vec3 world_position) {
+    if (!uSunEnabled || !uSunShadowEnabled) {
+        return 1.0;
+    }
+    vec4 clip = uSunShadowMatrix * vec4(world_position, 1.0);
+    vec3 projected = (clip.xyz / clip.w) * 0.5 + 0.5;
+    if (projected.x < 0.0 || projected.x > 1.0 ||
+        projected.y < 0.0 || projected.y > 1.0 ||
+        projected.z < 0.0 || projected.z > 1.0) {
+        return 1.0;
+    }
+    vec2 moments = texture(uSunShadowMoments, projected.xy).rg;
+    return evsm_visibility(moments, projected.z);
+}
+float diffuse_shadow_visibility(float shadow) {
+    return smoothstep(0.65, 1.0, shadow);
+}
+float specular_shadow_visibility(float shadow) {
+    return smoothstep(0.82, 1.0, shadow);
+}
+float diffuse_light_lobe(float ndotl) {
+    return ndotl * smoothstep(0.12, 0.45, ndotl);
+}
+float specular_light_lobe(float ndotl) {
+    return ndotl * smoothstep(0.35, 0.85, ndotl);
 }
 float distribution_ggx(float ndoth, float roughness) {
     float alpha = max(roughness * roughness, 0.001);
@@ -195,33 +293,63 @@ void main() {
     float roughness = clamp(material.r, 0.04, 1.0);
     float metallic = clamp(material.g, 0.0, 1.0);
     float specular = clamp(material.b, 0.0, 1.0);
-    vec3 normal = normalize((encoded_normal * 2.0) - 1.0);
     vec3 view_dir = normalize(uCameraPosition - world_position);
+    vec3 normal = normalize((encoded_normal * 2.0) - 1.0);
+    if (dot(normal, view_dir) < 0.0) {
+        normal = -normal;
+    }
     float ndotv = max(dot(normal, view_dir), 0.0001);
     vec3 f0 = mix(vec3(specular * 0.08), albedo, metallic);
     vec3 diffuse_color = albedo * (1.0 - metallic);
     vec3 color = diffuse_color * uAmbientColor;
-    for (int i = 0; i < 32; ++i) {
+    if (uSunEnabled && uSunIntensity > 0.0) {
+        vec3 sun_dir = normalize(-uSunDirection);
+        vec3 sun_half = normalize(sun_dir + view_dir);
+        float sun_ndotl = max(dot(normal, sun_dir), 0.0);
+        float sun_ndoth = max(dot(normal, sun_half), 0.0);
+        float sun_hdotl = max(dot(sun_half, sun_dir), 0.0);
+        float distribution = distribution_ggx(sun_ndoth, roughness);
+        float visibility = visibility_smith_ggx(ndotv, sun_ndotl, roughness);
+        vec3 fresnel = fresnel_schlick(sun_hdotl, f0);
+        vec3 specular_lobe = distribution * visibility * fresnel;
+        vec3 diffuse_lobe = diffuse_color / PI;
+        float shadow = sun_shadow_visibility(world_position);
+        float diffuse_shadow = diffuse_shadow_visibility(shadow);
+        float specular_shadow = specular_shadow_visibility(shadow);
+        float diffuse_ndotl = diffuse_light_lobe(sun_ndotl);
+        float specular_ndotl = specular_light_lobe(sun_ndotl);
+        color += ((diffuse_lobe * diffuse_shadow * diffuse_ndotl) +
+            (specular_lobe * specular_shadow * specular_ndotl)) * uSunColor * uSunIntensity;
+    }
+    for (int i = 0; i < MAX_POINT_LIGHTS; ++i) {
         if (i >= uLightCount) {
             break;
         }
-        vec3 light_vector = uLightPositions[i] - world_position;
+        PointLightRecord light = uPointLights[i];
+        vec3 light_position = light.position_radius.xyz;
+        vec3 light_vector = light_position - world_position;
         float light_distance = length(light_vector);
         vec3 light_dir = light_distance > 0.0001 ? light_vector / light_distance : vec3(0.0, 1.0, 0.0);
         vec3 half_dir = normalize(light_dir + view_dir);
         float ndotl = max(dot(normal, light_dir), 0.0);
         float ndoth = max(dot(normal, half_dir), 0.0);
         float hdotl = max(dot(half_dir, light_dir), 0.0);
-        float range = max(uLightRadii[i], 1.0);
+        float range = max(light.position_radius.w, 1.0);
         float attenuation = clamp(1.0 - (light_distance / range), 0.0, 1.0);
         attenuation *= attenuation;
-        vec3 radiance = uLightColors[i] * attenuation * uLightIntensities[i];
+        vec3 radiance = light.color_intensity.rgb * attenuation * light.color_intensity.a;
         float distribution = distribution_ggx(ndoth, roughness);
         float visibility = visibility_smith_ggx(ndotv, ndotl, roughness);
         vec3 fresnel = fresnel_schlick(hdotl, f0);
         vec3 specular_lobe = distribution * visibility * fresnel;
         vec3 diffuse_lobe = diffuse_color / PI;
-        color += (diffuse_lobe + specular_lobe) * radiance * ndotl;
+        float shadow = point_shadow_visibility(i, light_vector, light_distance, range);
+        float diffuse_shadow = diffuse_shadow_visibility(shadow);
+        float specular_shadow = specular_shadow_visibility(shadow);
+        float diffuse_ndotl = diffuse_light_lobe(ndotl);
+        float specular_ndotl = specular_light_lobe(ndotl);
+        color += ((diffuse_lobe * diffuse_shadow * diffuse_ndotl) +
+            (specular_lobe * specular_shadow * specular_ndotl)) * radiance;
     }
     gl_FragColor = vec4(color, 1.0);
 }
@@ -242,7 +370,74 @@ void main() {
         "deferred lighting",
         false
     );
-    return renderer.lighting_program != 0;
+    if (renderer.lighting_program == 0) {
+        return false;
+    }
+
+    static constexpr const char* shadow_vertex = R"(
+#version 430 compatibility
+layout(location = 0) in vec3 aPosition;
+uniform mat4 uLightMatrix;
+out vec3 vWorldPosition;
+void main() {
+    vWorldPosition = aPosition;
+    gl_Position = uLightMatrix * vec4(aPosition, 1.0);
+}
+)";
+
+    static constexpr const char* point_shadow_fragment = R"(
+#version 430 compatibility
+in vec3 vWorldPosition;
+uniform vec3 uLightPosition;
+uniform float uLightRadius;
+layout(location = 0) out vec2 oMoments;
+const float EVSM_EXPONENT = 8.0;
+float evsm_depth(float depth) {
+    return exp(EVSM_EXPONENT * (clamp(depth, 0.0, 1.0) - 1.0));
+}
+void main() {
+    float depth = clamp(length(vWorldPosition - uLightPosition) / max(uLightRadius, 1.0), 0.0, 1.0);
+    float warped = evsm_depth(depth);
+    oMoments = vec2(warped, warped * warped);
+}
+)";
+
+    static constexpr const char* sun_shadow_fragment = R"(
+#version 430 compatibility
+layout(location = 0) out vec2 oMoments;
+const float EVSM_EXPONENT = 8.0;
+float evsm_depth(float depth) {
+    return exp(EVSM_EXPONENT * (clamp(depth, 0.0, 1.0) - 1.0));
+}
+void main() {
+    float depth = gl_FragCoord.z;
+    float warped = evsm_depth(depth);
+    oMoments = vec2(warped, warped * warped);
+}
+)";
+
+    renderer.point_shadow_program = create_shader_program(
+        shadow_vertex,
+        point_shadow_fragment,
+        "point VSM shadow",
+        false
+    );
+    if (renderer.point_shadow_program == 0) {
+        renderer.shadows_disabled = true;
+        return true;
+    }
+    renderer.sun_shadow_program = create_shader_program(
+        shadow_vertex,
+        sun_shadow_fragment,
+        "sun VSM shadow",
+        false
+    );
+    if (renderer.sun_shadow_program == 0) {
+        glDeleteProgram(renderer.point_shadow_program);
+        renderer.point_shadow_program = 0;
+        renderer.shadows_disabled = true;
+    }
+    return true;
 }
 
 } // namespace
@@ -260,17 +455,44 @@ void destroy_deferred_renderer(DeferredRenderer& renderer) {
     if (renderer.material_texture != 0) {
         glDeleteTextures(1, &renderer.material_texture);
     }
+    if (renderer.point_shadow_texture != 0) {
+        glDeleteTextures(1, &renderer.point_shadow_texture);
+    }
+    if (renderer.sun_shadow_texture != 0) {
+        glDeleteTextures(1, &renderer.sun_shadow_texture);
+    }
+    if (renderer.point_light_buffer != 0) {
+        glDeleteBuffers(1, &renderer.point_light_buffer);
+    }
+    if (renderer.point_shadow_face_buffer != 0) {
+        glDeleteBuffers(1, &renderer.point_shadow_face_buffer);
+    }
     if (renderer.depth_renderbuffer != 0) {
         glDeleteRenderbuffers(1, &renderer.depth_renderbuffer);
     }
+    if (renderer.point_shadow_depth_renderbuffer != 0) {
+        glDeleteRenderbuffers(1, &renderer.point_shadow_depth_renderbuffer);
+    }
+    if (renderer.sun_shadow_depth_renderbuffer != 0) {
+        glDeleteRenderbuffers(1, &renderer.sun_shadow_depth_renderbuffer);
+    }
     if (renderer.framebuffer != 0) {
         glDeleteFramebuffers(1, &renderer.framebuffer);
+    }
+    if (renderer.shadow_framebuffer != 0) {
+        glDeleteFramebuffers(1, &renderer.shadow_framebuffer);
     }
     if (renderer.geometry_program != 0) {
         glDeleteProgram(renderer.geometry_program);
     }
     if (renderer.lighting_program != 0) {
         glDeleteProgram(renderer.lighting_program);
+    }
+    if (renderer.point_shadow_program != 0) {
+        glDeleteProgram(renderer.point_shadow_program);
+    }
+    if (renderer.sun_shadow_program != 0) {
+        glDeleteProgram(renderer.sun_shadow_program);
     }
     renderer = {};
 }
@@ -287,13 +509,26 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
             return false;
         }
         glGenFramebuffers(1, &renderer.framebuffer);
+        glGenFramebuffers(1, &renderer.shadow_framebuffer);
         glGenRenderbuffers(1, &renderer.depth_renderbuffer);
+        glGenRenderbuffers(1, &renderer.point_shadow_depth_renderbuffer);
+        glGenRenderbuffers(1, &renderer.sun_shadow_depth_renderbuffer);
+        glGenBuffers(1, &renderer.point_light_buffer);
+        glGenBuffers(1, &renderer.point_shadow_face_buffer);
         renderer.initialized = true;
     }
 
+    const bool shadow_resources_ready =
+        renderer.shadows_disabled ||
+        (renderer.point_shadow_texture != 0 &&
+            renderer.sun_shadow_texture != 0 &&
+            renderer.point_shadow_atlas_size == kPointShadowAtlasSize &&
+            renderer.sun_shadow_resolution == kSunShadowResolution);
+
     if (renderer.width == width && renderer.height == height &&
         renderer.position_texture != 0 && renderer.normal_texture != 0 &&
-        renderer.albedo_texture != 0 && renderer.material_texture != 0) {
+        renderer.albedo_texture != 0 && renderer.material_texture != 0 &&
+        shadow_resources_ready) {
         return true;
     }
 
@@ -316,6 +551,82 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
     renderer.normal_texture = create_gbuffer_texture(width, height, GL_RGB16F, GL_RGB, GL_FLOAT);
     renderer.albedo_texture = create_gbuffer_texture(width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
     renderer.material_texture = create_gbuffer_texture(width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+
+    if (!renderer.shadows_disabled &&
+        (renderer.point_shadow_texture == 0 ||
+            renderer.sun_shadow_texture == 0 ||
+            renderer.point_shadow_atlas_size != kPointShadowAtlasSize ||
+            renderer.sun_shadow_resolution != kSunShadowResolution)) {
+        GLint max_texture_size = 0;
+        GLint max_renderbuffer_size = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+        glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_renderbuffer_size);
+        if (max_texture_size < kPointShadowAtlasSize || max_renderbuffer_size < kPointShadowAtlasSize) {
+            std::cerr << "Deferred shadow atlas disabled: requested " << kPointShadowAtlasSize
+                      << " but GL_MAX_TEXTURE_SIZE=" << max_texture_size
+                      << " GL_MAX_RENDERBUFFER_SIZE=" << max_renderbuffer_size << ".\n";
+            renderer.shadows_disabled = true;
+        }
+        if (!renderer.shadows_disabled) {
+            if (renderer.point_shadow_texture != 0) {
+                glDeleteTextures(1, &renderer.point_shadow_texture);
+            }
+            if (renderer.sun_shadow_texture != 0) {
+                glDeleteTextures(1, &renderer.sun_shadow_texture);
+            }
+
+            renderer.point_shadow_atlas_size = kPointShadowAtlasSize;
+            renderer.sun_shadow_resolution = kSunShadowResolution;
+
+            glGenTextures(1, &renderer.point_shadow_texture);
+            glBindTexture(GL_TEXTURE_2D, renderer.point_shadow_texture);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RG32F,
+                kPointShadowAtlasSize,
+                kPointShadowAtlasSize,
+                0,
+                GL_RG,
+                GL_FLOAT,
+                nullptr
+            );
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            const GLenum point_error = glGetError();
+            glBindTexture(GL_TEXTURE_2D, 0);
+
+            glGenTextures(1, &renderer.sun_shadow_texture);
+            glBindTexture(GL_TEXTURE_2D, renderer.sun_shadow_texture);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RG32F,
+                kSunShadowResolution,
+                kSunShadowResolution,
+                0,
+                GL_RG,
+                GL_FLOAT,
+                nullptr
+            );
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            const GLenum sun_error = glGetError();
+            glBindTexture(GL_TEXTURE_2D, 0);
+
+            if (renderer.point_shadow_texture == 0 || renderer.sun_shadow_texture == 0 ||
+                point_error != GL_NO_ERROR || sun_error != GL_NO_ERROR) {
+                std::cerr << "Deferred shadow texture allocation failed"
+                          << " point_error=0x" << std::hex << point_error
+                          << " sun_error=0x" << sun_error << std::dec << ".\n";
+                renderer.shadows_disabled = true;
+            }
+        }
+    }
 
     glBindRenderbuffer(GL_RENDERBUFFER, renderer.depth_renderbuffer);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);

@@ -41,6 +41,7 @@ add_executable(Undecedent
     src/runtime_visibility.cpp
     src/runtime_world.cpp
     src/screen_draw.cpp
+    src/shadow_atlas.cpp
     src/sdl_platform.cpp
     src/triangulator.cpp
     glad/src/glad.c
@@ -134,3 +135,28 @@ add_executable(UndecedentMaterialsTests
 )
 
 target_include_directories(UndecedentMaterialsTests PRIVATE include)
+
+add_executable(UndecedentShadowAtlasTests
+    tests/shadow_atlas_tests.cpp
+    src/shadow_atlas.cpp
+)
+
+target_include_directories(UndecedentShadowAtlasTests PRIVATE include)
+
+add_executable(UndecedentEditorEntityTests
+    tests/editor_entity_tests.cpp
+    src/csg.cpp
+    src/displacement.cpp
+    src/editor.cpp
+    src/materials.cpp
+    src/math3d.cpp
+    src/runtime_geometry.cpp
+    src/runtime_pick.cpp
+    src/runtime_render_cache.cpp
+    src/runtime_world.cpp
+    src/screen_draw.cpp
+    src/triangulator.cpp
+    glad/src/glad.c
+)
+
+target_include_directories(UndecedentEditorEntityTests PRIVATE include glad/include)

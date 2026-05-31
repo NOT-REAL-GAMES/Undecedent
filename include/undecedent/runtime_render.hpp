@@ -53,6 +53,7 @@ int draw_deferred_runtime_world(
     const RuntimeWorld& world,
     const RuntimeRenderCache& render_cache,
     const std::vector<PointLight>& point_lights,
+    const WorldLighting& world_lighting,
     int width,
     int height,
     const GameCamera& camera,

@@ -47,9 +47,11 @@ using undecedent::draw_player_spawn_3d;
 using undecedent::draw_runtime_world;
 using undecedent::draw_stroke_text;
 using undecedent::draw_entity_dropdown;
+using undecedent::draw_entity_inspector;
 using undecedent::draw_material_selector;
 using undecedent::draw_sculpt_button;
 using undecedent::draw_subdivision_controls;
+using undecedent::draw_translation_gizmo;
 using undecedent::screen_to_ndc_x;
 using undecedent::screen_to_ndc_y;
 using undecedent::configure_gl_attributes;
@@ -64,6 +66,7 @@ using undecedent::apply_editor_scroll_zoom;
 using undecedent::apply_editor_slice_scroll;
 using undecedent::apply_material_to_surface;
 using undecedent::cancel_plane_tool;
+using undecedent::clear_entity_selection;
 using undecedent::clear_sector_selection;
 using undecedent::commit_plane_tool;
 using undecedent::committed_vertex_at_screen;
@@ -85,6 +88,7 @@ using undecedent::GameCamera;
 using undecedent::GameControlConfig;
 using undecedent::GameRenderConfig;
 using undecedent::handle_entity_dropdown_click;
+using undecedent::handle_entity_inspector_click;
 using undecedent::handle_sculpt_button_click;
 using undecedent::handle_subdivision_controls_click;
 using undecedent::is_dragged_committed_ref;
@@ -96,6 +100,9 @@ using undecedent::place_entity;
 using undecedent::place_entity_at_origin;
 using undecedent::PlaneToolMode;
 using undecedent::pick_runtime_surface;
+using undecedent::pick_editor_entity_2d;
+using undecedent::pick_editor_entity_3d;
+using undecedent::select_entity;
 using undecedent::player_physics_config;
 using undecedent::PlaytestPlayerState;
 using undecedent::rebuild_runtime_geometry;
@@ -111,6 +118,7 @@ using undecedent::sculpt_displacement_at_pick;
 using undecedent::start_hole_plane;
 using undecedent::start_knife_tool;
 using undecedent::start_outer_plane;
+using undecedent::start_translation_gizmo_drag;
 using undecedent::SurfacePick;
 using undecedent::toggle_sector_selection;
 using undecedent::undo_editor_action;
@@ -119,6 +127,8 @@ using undecedent::update_editor_camera;
 using undecedent::update_game_camera;
 using undecedent::update_playtest_camera;
 using undecedent::update_snapped_mouse;
+using undecedent::update_translation_gizmo_drag;
+using undecedent::finish_translation_gizmo_drag;
 using undecedent::world_to_ndc_x;
 using undecedent::world_to_ndc_y;
 using undecedent::world_to_screen_x;
@@ -138,7 +148,6 @@ constexpr float kPlayerJumpVelocity = 320.0F;
 constexpr float kPlayerTerminalFallSpeed = 900.0F;
 constexpr float kPlayerGravityDrag = 0.10F;
 constexpr float kPlayerGroundProbe = 1.0F;
-constexpr int kMaxDeferredPointLights = 32;
 constexpr float kGameNearPlane = 1.0F;
 constexpr float kGameFarPlane = 20000.0F;
 constexpr float kSectorHeightStep = 8.0F;
@@ -152,6 +161,7 @@ struct ProfilerDisplay {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double shadow_ms = 0.0;
     double overlay_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
@@ -167,6 +177,7 @@ struct ProfilerAccumulator {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double shadow_ms = 0.0;
     double overlay_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
@@ -185,6 +196,7 @@ struct BenchmarkAccumulator {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double shadow_ms = 0.0;
     double overlay_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
@@ -305,6 +317,7 @@ void print_benchmark_report(
         << " events=" << format_ms(accumulator.events_ms * inv_frames) << "ms"
         << " update=" << format_ms(accumulator.update_ms * inv_frames) << "ms"
         << " render=" << format_ms(accumulator.render_ms * inv_frames) << "ms"
+        << " shadow=" << format_ms(accumulator.shadow_ms * inv_frames) << "ms"
         << " overlay=" << format_ms(accumulator.overlay_ms * inv_frames) << "ms"
         << " finish=" << format_ms(accumulator.finish_ms * inv_frames) << "ms"
         << " swap=" << format_ms(accumulator.swap_ms * inv_frames) << "ms"
@@ -421,6 +434,7 @@ void process_pending_map_dialogs(
                 editor_world.sectors,
                 editor_world.player_spawn,
                 editor_world.point_lights,
+                editor_world.world_lighting,
                 undecedent::editor_map_dirty_state(editor_world),
                 save_path
             );
@@ -443,7 +457,9 @@ void process_pending_map_dialogs(
         editor_world.sectors = result.sectors;
         editor_world.player_spawn = result.player_spawn;
         editor_world.point_lights = result.point_lights;
+        editor_world.world_lighting = result.world_lighting;
         clear_sector_selection(editor_world);
+        clear_entity_selection(editor_world);
         rebuild_runtime_geometry(editor_world);
         undecedent::clear_map_dirty_state(editor_world);
         if (!editor_enabled) {
@@ -496,6 +512,7 @@ void draw_profiler_overlay(
         "EVENTS " + format_ms(profiler.events_ms) + "MS",
         "UPDATE " + format_ms(profiler.update_ms) + "MS",
         "RENDER " + format_ms(profiler.render_ms) + "MS",
+        "SHADOW " + format_ms(profiler.shadow_ms) + "MS",
         "OVERLAY " + format_ms(profiler.overlay_ms) + "MS",
         "FINISH " + format_ms(profiler.finish_ms) + "MS",
         "SWAP " + format_ms(profiler.swap_ms) + "MS",
@@ -721,6 +738,7 @@ int main() {
         double events_ms = 0.0;
         double update_ms = 0.0;
         double render_ms = 0.0;
+        double shadow_ms = 0.0;
         double overlay_ms = 0.0;
         double finish_ms = 0.0;
         double swap_ms = 0.0;
@@ -975,6 +993,16 @@ int main() {
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
+                if (handle_entity_inspector_click(
+                        editor_world,
+                        width,
+                        height,
+                        event.button.x,
+                        event.button.y,
+                        (SDL_GetModState() & SDL_KMOD_SHIFT) != 0
+                    )) {
+                    continue;
+                }
             }
 
             if (app_mode == AppMode::Editor2D && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
@@ -991,6 +1019,16 @@ int main() {
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
+                if (handle_entity_inspector_click(
+                        editor_world,
+                        width,
+                        height,
+                        event.button.x,
+                        event.button.y,
+                        (SDL_GetModState() & SDL_KMOD_SHIFT) != 0
+                    )) {
+                    continue;
+                }
             }
 
             if (app_mode == AppMode::Editor3D && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
@@ -998,6 +1036,35 @@ int main() {
                 int width = 0;
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
+                const bool shift_select = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+                if (event.button.button == SDL_BUTTON_LEFT &&
+                    !shift_select &&
+                    !editor_world.displacement_sculpt_enabled) {
+                    if (start_translation_gizmo_drag(
+                            editor_world,
+                            game_camera,
+                            width,
+                            height,
+                            event.button.x,
+                            event.button.y,
+                            game_render_config
+                        )) {
+                        continue;
+                    }
+                    const auto entity_pick = pick_editor_entity_3d(
+                        editor_world,
+                        game_camera,
+                        width,
+                        height,
+                        event.button.x,
+                        event.button.y,
+                        game_render_config
+                    );
+                    if (entity_pick.hit) {
+                        select_entity(editor_world, entity_pick.entity);
+                        continue;
+                    }
+                }
                 const SurfacePick pick = pick_runtime_surface(
                     editor_world.runtime_world,
                     game_camera,
@@ -1014,7 +1081,6 @@ int main() {
                     continue;
                 }
                 if (event.button.button == SDL_BUTTON_LEFT) {
-                    const bool shift_select = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
                     if (!shift_select && pick.hit) {
                         undecedent::Vec3 position = pick.point;
                         if (editor_world.entity_placement == EntityPlacementType::PointLight) {
@@ -1084,6 +1150,31 @@ int main() {
                 continue;
             }
 
+            if (app_mode == AppMode::Editor3D && event.type == SDL_EVENT_MOUSE_MOTION &&
+                editor_world.has_dragged_entity_gizmo) {
+                int width = 0;
+                int height = 0;
+                SDL_GetWindowSizeInPixels(window, &width, &height);
+                update_translation_gizmo_drag(
+                    editor_world,
+                    game_camera,
+                    width,
+                    height,
+                    event.motion.x,
+                    event.motion.y,
+                    game_render_config,
+                    (SDL_GetModState() & SDL_KMOD_SHIFT) != 0
+                );
+                continue;
+            }
+
+            if (app_mode == AppMode::Editor3D && event.type == SDL_EVENT_MOUSE_BUTTON_UP &&
+                event.button.button == SDL_BUTTON_LEFT &&
+                editor_world.has_dragged_entity_gizmo) {
+                finish_translation_gizmo_drag(editor_world);
+                continue;
+            }
+
             if (!is_2d_editor_mode(app_mode)) {
                 continue;
             }
@@ -1142,6 +1233,22 @@ int main() {
                             refresh_draft(editor_world);
                         }
                     } else {
+                        const bool shift_select = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+                        if (!shift_select) {
+                            const auto entity_pick = pick_editor_entity_2d(
+                                editor_world,
+                                editor_camera,
+                                width,
+                                height,
+                                event.button.x,
+                                event.button.y,
+                                game_render_config.player_eye_height
+                            );
+                            if (entity_pick.hit) {
+                                select_entity(editor_world, entity_pick.entity);
+                                continue;
+                            }
+                        }
                         undecedent::Vec2 hit_vertex{};
                         if (committed_vertex_at_screen(
                                 editor_world,
@@ -1166,7 +1273,6 @@ int main() {
                             screen_to_world_y(event.button.y, height, editor_camera),
                         };
                         const int clicked_sector = sector_at_point(editor_world, world);
-                        const bool shift_select = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
                         if (!shift_select && clicked_sector < 0) {
                             place_entity_at_origin(
                                 editor_world,
@@ -1341,12 +1447,14 @@ int main() {
                     editor_world.runtime_world,
                     editor_world.runtime_render_cache,
                     editor_world.point_lights,
+                    editor_world.world_lighting,
                     width,
                     height,
                     game_camera,
                     runtime_wire_overlay_enabled,
                     game_render_config
                 );
+                shadow_ms = deferred_renderer.last_shadow_ms;
             } else {
                 visible_triangle_count = draw_runtime_world(
                     editor_world.runtime_world,
@@ -1362,6 +1470,7 @@ int main() {
             if (editor_3d_now) {
                 draw_point_lights_3d(editor_world.point_lights, width, height, game_camera, game_render_config);
                 draw_player_spawn_3d(editor_world.player_spawn, width, height, game_camera, game_render_config);
+                draw_translation_gizmo(editor_world, width, height, game_camera, game_render_config);
             }
         }
         render_ms = ticks_to_ms(render_start_ticks, SDL_GetTicksNS());
@@ -1408,6 +1517,7 @@ int main() {
             draw_subdivision_controls(editor_world, width, height);
             draw_sculpt_button(editor_world, width, height, mouse_x, mouse_y);
             draw_entity_dropdown(editor_world, width, height);
+            draw_entity_inspector(editor_world, width, height);
         }
         overlay_ms = ticks_to_ms(overlay_start_ticks, SDL_GetTicksNS());
 
@@ -1428,6 +1538,7 @@ int main() {
         profiler_accumulator.events_ms += events_ms;
         profiler_accumulator.update_ms += update_ms;
         profiler_accumulator.render_ms += render_ms;
+        profiler_accumulator.shadow_ms += shadow_ms;
         profiler_accumulator.overlay_ms += overlay_ms;
         profiler_accumulator.finish_ms += finish_ms;
         profiler_accumulator.swap_ms += swap_ms;
@@ -1439,6 +1550,7 @@ int main() {
             benchmark_accumulator.events_ms += events_ms;
             benchmark_accumulator.update_ms += update_ms;
             benchmark_accumulator.render_ms += render_ms;
+            benchmark_accumulator.shadow_ms += shadow_ms;
             benchmark_accumulator.overlay_ms += overlay_ms;
             benchmark_accumulator.finish_ms += finish_ms;
             benchmark_accumulator.swap_ms += swap_ms;
@@ -1464,6 +1576,7 @@ int main() {
             displayed_profiler.events_ms = profiler_accumulator.events_ms * inv_frames;
             displayed_profiler.update_ms = profiler_accumulator.update_ms * inv_frames;
             displayed_profiler.render_ms = profiler_accumulator.render_ms * inv_frames;
+            displayed_profiler.shadow_ms = profiler_accumulator.shadow_ms * inv_frames;
             displayed_profiler.overlay_ms = profiler_accumulator.overlay_ms * inv_frames;
             displayed_profiler.finish_ms = profiler_accumulator.finish_ms * inv_frames;
             displayed_profiler.swap_ms = profiler_accumulator.swap_ms * inv_frames;

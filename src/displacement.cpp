@@ -299,18 +299,25 @@ void normalize_displacement(SectorPlane& sector, const SectorSurfaceKind surface
 
 void ensure_displacement_samples(SectorPlane& sector, const SectorSurfaceKind surface) {
     SectorSurfaceDisplacement& displacement = displacement_for_surface(sector, surface);
-    displacement.enabled = true;
-    displacement.resolution = clamped_displacement_resolution(displacement.resolution);
+    set_displacement_resolution(sector, surface, displacement.resolution);
+}
 
-    const std::map<SampleKey, float> old_offsets = sample_offsets_by_key(displacement);
+void set_displacement_resolution(SectorPlane& sector, const SectorSurfaceKind surface, const int target_resolution) {
+    SectorSurfaceDisplacement& displacement = displacement_for_surface(sector, surface);
+    const bool resample_existing_surface = displacement.enabled && !displacement.samples.empty();
+    const int resolution = clamped_displacement_resolution(target_resolution);
+
     std::map<SampleKey, SectorDisplacementSample> samples;
-    generated_sample_points(sector, displacement.resolution, samples);
+    generated_sample_points(sector, resolution, samples);
     for (auto& [key, sample] : samples) {
-        const auto found = old_offsets.find(key);
-        if (found != old_offsets.end()) {
-            sample.offset = found->second;
+        (void)key;
+        if (resample_existing_surface) {
+            sample.offset = sample_surface_offset(sector, surface, sample.position);
         }
     }
+
+    displacement.enabled = true;
+    displacement.resolution = resolution;
 
     displacement.samples.clear();
     displacement.samples.reserve(samples.size());

@@ -53,8 +53,141 @@ bool subdivision_controls_rect(const int width, const int height, float& x, floa
     return true;
 }
 
+bool entity_inspector_rect(const int width, const int height, float& x, float& y, float& w, float& h) {
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    w = 246.0F;
+    h = std::min(340.0F, std::max(170.0F, static_cast<float>(height) - 106.0F));
+    x = static_cast<float>(width) - w - 14.0F;
+    y = 52.0F;
+    return true;
+}
+
 bool point_in_rect(const float px, const float py, const float x, const float y, const float w, const float h) {
     return px >= x && px <= x + w && py >= y && py <= y + h;
+}
+
+std::string entity_selection_label(const EditorWorld& editor_world) {
+    switch (editor_world.selected_entity.kind) {
+    case SelectedEntityKind::PlayerSpawn:
+        return "PLAYER SPAWN";
+    case SelectedEntityKind::PointLight:
+        return "POINT LIGHT";
+    case SelectedEntityKind::SunLight:
+        return "SUN LIGHT";
+    case SelectedEntityKind::None:
+        return "NO ENTITY";
+    }
+    return "NO ENTITY";
+}
+
+float property_step(const EntityProperty property, const bool fine) {
+    switch (property) {
+    case EntityProperty::Yaw: return fine ? 0.025F : 0.125F;
+    case EntityProperty::ColorR:
+    case EntityProperty::ColorG:
+    case EntityProperty::ColorB:
+    case EntityProperty::SunDirectionX:
+    case EntityProperty::SunDirectionY:
+    case EntityProperty::SunDirectionZ:
+        return fine ? 0.01F : 0.05F;
+    case EntityProperty::Radius:
+        return fine ? 1.0F : 16.0F;
+    case EntityProperty::Intensity:
+        return fine ? 0.05F : 0.25F;
+    case EntityProperty::PositionX:
+    case EntityProperty::PositionY:
+    case EntityProperty::PositionZ:
+        return fine ? 1.0F : 8.0F;
+    case EntityProperty::SunEnabled:
+        return 0.0F;
+    }
+    return fine ? 1.0F : 8.0F;
+}
+
+std::string format_property_value(const float value) {
+    return format_world_units(value);
+}
+
+void draw_button_rect(
+    const float x,
+    const float y,
+    const float w,
+    const float h,
+    const int width,
+    const int height,
+    const bool active = false
+) {
+    glBegin(GL_QUADS);
+    glColor4f(active ? 0.18F : 0.0F, active ? 0.40F : 0.0F, active ? 0.34F : 0.0F, active ? 0.80F : 0.42F);
+    draw_screen_quad(x, y, w, h, width, height);
+    glEnd();
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, active ? 0.96F : 0.62F);
+    draw_screen_line(x, y, x + w, y, width, height);
+    draw_screen_line(x + w, y, x + w, y + h, width, height);
+    draw_screen_line(x + w, y + h, x, y + h, width, height);
+    draw_screen_line(x, y + h, x, y, width, height);
+    glEnd();
+}
+
+void draw_ui_text(
+    const std::string& label,
+    const float x,
+    const float y,
+    const float size,
+    const int width,
+    const int height,
+    const float alpha = 0.92F
+) {
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, alpha);
+    draw_stroke_text(label, x, y, size, width, height);
+    glEnd();
+}
+
+bool inspector_step_click(
+    EditorWorld& editor_world,
+    const EntityProperty property,
+    const float row_x,
+    const float row_y,
+    const float row_w,
+    const float row_h,
+    const float mouse_x,
+    const float mouse_y,
+    const bool fine
+) {
+    const float button_w = 24.0F;
+    if (point_in_rect(mouse_x, mouse_y, row_x + row_w - (button_w * 2.0F) - 10.0F, row_y, button_w, row_h)) {
+        return adjust_selected_entity_property(editor_world, property, -property_step(property, fine));
+    }
+    if (point_in_rect(mouse_x, mouse_y, row_x + row_w - button_w - 6.0F, row_y, button_w, row_h)) {
+        return adjust_selected_entity_property(editor_world, property, property_step(property, fine));
+    }
+    return false;
+}
+
+void draw_property_row(
+    const std::string& label,
+    const std::string& value,
+    const float x,
+    const float y,
+    const float w,
+    const float row_h,
+    const int width,
+    const int height
+) {
+    draw_ui_text(label, x + 8.0F, y + 7.0F, 4.8F, width, height);
+    draw_ui_text(value, x + 92.0F, y + 7.0F, 4.8F, width, height);
+    draw_button_rect(x + w - 58.0F, y + 2.0F, 22.0F, row_h - 4.0F, width, height);
+    draw_button_rect(x + w - 30.0F, y + 2.0F, 22.0F, row_h - 4.0F, width, height);
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    draw_screen_line(x + w - 52.0F, y + (row_h * 0.5F), x + w - 42.0F, y + (row_h * 0.5F), width, height);
+    draw_screen_line(x + w - 24.0F, y + (row_h * 0.5F), x + w - 14.0F, y + (row_h * 0.5F), width, height);
+    draw_screen_line(x + w - 19.0F, y + (row_h * 0.5F) - 5.0F, x + w - 19.0F, y + (row_h * 0.5F) + 5.0F, width, height);
+    glEnd();
 }
 
 } // namespace
@@ -340,6 +473,261 @@ void draw_entity_dropdown(const EditorWorld& editor_world, const int width, cons
     glEnd();
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
+}
+
+bool handle_entity_inspector_click(
+    EditorWorld& editor_world,
+    const int width,
+    const int height,
+    const float mouse_x,
+    const float mouse_y,
+    const bool fine
+) {
+    float x = 0.0F;
+    float y = 0.0F;
+    float w = 0.0F;
+    float h = 0.0F;
+    if (!entity_inspector_rect(width, height, x, y, w, h) || !point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
+        return false;
+    }
+
+    const float selector_y = y + 32.0F;
+    const float selector_h = 24.0F;
+    const float chip_w = (w - 28.0F) / 3.0F;
+    if (point_in_rect(mouse_x, mouse_y, x + 8.0F, selector_y, chip_w, selector_h)) {
+        if (editor_world.player_spawn.set) {
+            select_entity(editor_world, SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0});
+        }
+        return true;
+    }
+    if (point_in_rect(mouse_x, mouse_y, x + 14.0F + chip_w, selector_y, chip_w, selector_h)) {
+        ensure_editor_stable_ids(editor_world);
+        if (!editor_world.point_lights.empty()) {
+            select_entity(
+                editor_world,
+                SelectedEntityRef{SelectedEntityKind::PointLight, editor_world.point_lights.front().id}
+            );
+        }
+        return true;
+    }
+    if (point_in_rect(mouse_x, mouse_y, x + 20.0F + (chip_w * 2.0F), selector_y, chip_w, selector_h)) {
+        select_entity(editor_world, SelectedEntityRef{SelectedEntityKind::SunLight, 0});
+        return true;
+    }
+
+    const float row_h = 23.0F;
+    float row_y = y + 68.0F;
+    const auto row_hit = [&](const int row_index) {
+        return point_in_rect(mouse_x, mouse_y, x + 8.0F, row_y + (static_cast<float>(row_index) * row_h), w - 16.0F, row_h);
+    };
+    const auto step_row = [&](const int row_index, const EntityProperty property) {
+        return inspector_step_click(
+            editor_world,
+            property,
+            x + 8.0F,
+            row_y + (static_cast<float>(row_index) * row_h),
+            w - 16.0F,
+            row_h,
+            mouse_x,
+            mouse_y,
+            fine
+        );
+    };
+
+    switch (editor_world.selected_entity.kind) {
+    case SelectedEntityKind::PlayerSpawn:
+        if (step_row(0, EntityProperty::PositionX)) return true;
+        if (step_row(1, EntityProperty::PositionY)) return true;
+        if (step_row(2, EntityProperty::PositionZ)) return true;
+        if (step_row(3, EntityProperty::Yaw)) return true;
+        if (row_hit(5)) {
+            delete_selected_entity(editor_world);
+            return true;
+        }
+        break;
+    case SelectedEntityKind::PointLight:
+        if (step_row(0, EntityProperty::PositionX)) return true;
+        if (step_row(1, EntityProperty::PositionY)) return true;
+        if (step_row(2, EntityProperty::PositionZ)) return true;
+        if (step_row(3, EntityProperty::ColorR)) return true;
+        if (step_row(4, EntityProperty::ColorG)) return true;
+        if (step_row(5, EntityProperty::ColorB)) return true;
+        if (step_row(6, EntityProperty::Radius)) return true;
+        if (step_row(7, EntityProperty::Intensity)) return true;
+        if (row_hit(9)) {
+            delete_selected_entity(editor_world);
+            return true;
+        }
+        break;
+    case SelectedEntityKind::SunLight:
+        if (row_hit(0)) {
+            adjust_selected_entity_property(editor_world, EntityProperty::SunEnabled, 0.0F);
+            return true;
+        }
+        if (step_row(1, EntityProperty::SunDirectionX)) return true;
+        if (step_row(2, EntityProperty::SunDirectionY)) return true;
+        if (step_row(3, EntityProperty::SunDirectionZ)) return true;
+        if (step_row(4, EntityProperty::ColorR)) return true;
+        if (step_row(5, EntityProperty::ColorG)) return true;
+        if (step_row(6, EntityProperty::ColorB)) return true;
+        if (step_row(7, EntityProperty::Intensity)) return true;
+        break;
+    case SelectedEntityKind::None:
+        break;
+    }
+
+    return true;
+}
+
+void draw_entity_inspector(const EditorWorld& editor_world, const int width, const int height) {
+    float x = 0.0F;
+    float y = 0.0F;
+    float w = 0.0F;
+    float h = 0.0F;
+    if (!entity_inspector_rect(width, height, x, y, w, h)) {
+        return;
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBegin(GL_QUADS);
+    glColor4f(0.0F, 0.0F, 0.0F, 0.44F);
+    draw_screen_quad(x, y, w, h, width, height);
+    glEnd();
+
+    glLineWidth(1.5F);
+    glBegin(GL_LINES);
+    glColor4f(0.90F, 0.96F, 0.76F, 0.88F);
+    draw_screen_line(x, y, x + w, y, width, height);
+    draw_screen_line(x + w, y, x + w, y + h, width, height);
+    draw_screen_line(x + w, y + h, x, y + h, width, height);
+    draw_screen_line(x, y + h, x, y, width, height);
+    glEnd();
+
+    draw_ui_text("INSPECTOR", x + 8.0F, y + 10.0F, 5.4F, width, height);
+    const float selector_y = y + 32.0F;
+    const float selector_h = 24.0F;
+    const float chip_w = (w - 28.0F) / 3.0F;
+    draw_button_rect(
+        x + 8.0F,
+        selector_y,
+        chip_w,
+        selector_h,
+        width,
+        height,
+        editor_world.selected_entity.kind == SelectedEntityKind::PlayerSpawn
+    );
+    draw_button_rect(
+        x + 14.0F + chip_w,
+        selector_y,
+        chip_w,
+        selector_h,
+        width,
+        height,
+        editor_world.selected_entity.kind == SelectedEntityKind::PointLight
+    );
+    draw_button_rect(
+        x + 20.0F + (chip_w * 2.0F),
+        selector_y,
+        chip_w,
+        selector_h,
+        width,
+        height,
+        editor_world.selected_entity.kind == SelectedEntityKind::SunLight
+    );
+    draw_ui_text("SPAWN", x + 18.0F, selector_y + 8.0F, 4.5F, width, height);
+    draw_ui_text("LIGHT", x + 24.0F + chip_w, selector_y + 8.0F, 4.5F, width, height);
+    draw_ui_text("SUN", x + 34.0F + (chip_w * 2.0F), selector_y + 8.0F, 4.5F, width, height);
+
+    draw_ui_text(entity_selection_label(editor_world), x + 8.0F, y + 61.0F, 4.7F, width, height);
+    const float row_h = 23.0F;
+    float row_y = y + 68.0F;
+    int row = 0;
+    const auto draw_row = [&](const std::string& label, const std::string& value) {
+        draw_property_row(label, value, x + 8.0F, row_y + (static_cast<float>(row) * row_h), w - 16.0F, row_h, width, height);
+        ++row;
+    };
+    const auto gap = [&]() {
+        ++row;
+    };
+
+    switch (editor_world.selected_entity.kind) {
+    case SelectedEntityKind::PlayerSpawn:
+        if (editor_world.player_spawn.set) {
+            draw_row("POS X", format_property_value(editor_world.player_spawn.position.x));
+            draw_row("POS Y", format_property_value(editor_world.player_spawn.position.y));
+            draw_row("POS Z", format_property_value(editor_world.player_spawn.position.z));
+            draw_row("YAW", format_property_value(editor_world.player_spawn.yaw));
+            gap();
+            draw_button_rect(x + 8.0F, row_y + (static_cast<float>(row) * row_h), w - 16.0F, row_h - 2.0F, width, height);
+            draw_ui_text("UNSET PLAYER SPAWN", x + 20.0F, row_y + (static_cast<float>(row) * row_h) + 7.0F, 4.8F, width, height);
+        }
+        break;
+    case SelectedEntityKind::PointLight:
+        if (const PointLight* light = selected_point_light(editor_world)) {
+            draw_row("POS X", format_property_value(light->position.x));
+            draw_row("POS Y", format_property_value(light->position.y));
+            draw_row("POS Z", format_property_value(light->position.z));
+            draw_row("RED", format_property_value(light->color.x));
+            draw_row("GREEN", format_property_value(light->color.y));
+            draw_row("BLUE", format_property_value(light->color.z));
+            draw_row("RADIUS", format_property_value(light->radius));
+            draw_row("POWER", format_property_value(light->intensity));
+            gap();
+            draw_button_rect(x + 8.0F, row_y + (static_cast<float>(row) * row_h), w - 16.0F, row_h - 2.0F, width, height);
+            draw_ui_text("DELETE POINT LIGHT", x + 22.0F, row_y + (static_cast<float>(row) * row_h) + 7.0F, 4.8F, width, height);
+        }
+        break;
+    case SelectedEntityKind::SunLight:
+        draw_button_rect(x + 8.0F, row_y, w - 16.0F, row_h - 2.0F, width, height, editor_world.world_lighting.sun_enabled);
+        draw_ui_text(editor_world.world_lighting.sun_enabled ? "ENABLED" : "DISABLED", x + 20.0F, row_y + 7.0F, 4.8F, width, height);
+        ++row;
+        draw_row("DIR X", format_property_value(editor_world.world_lighting.sun_direction.x));
+        draw_row("DIR Y", format_property_value(editor_world.world_lighting.sun_direction.y));
+        draw_row("DIR Z", format_property_value(editor_world.world_lighting.sun_direction.z));
+        draw_row("RED", format_property_value(editor_world.world_lighting.sun_color.x));
+        draw_row("GREEN", format_property_value(editor_world.world_lighting.sun_color.y));
+        draw_row("BLUE", format_property_value(editor_world.world_lighting.sun_color.z));
+        draw_row("POWER", format_property_value(editor_world.world_lighting.sun_intensity));
+        break;
+    case SelectedEntityKind::None:
+        draw_ui_text("PICK AN ENTITY OR SUN", x + 18.0F, row_y + 10.0F, 4.8F, width, height);
+        break;
+    }
+
+    glLineWidth(1.0F);
+    glDisable(GL_BLEND);
+}
+
+void draw_translation_gizmo(
+    const EditorWorld& editor_world,
+    const int width,
+    const int height,
+    const GameCamera& camera,
+    const GameRenderConfig& config
+) {
+    Vec3 origin{};
+    if (!selected_entity_position(editor_world, origin) || width <= 0 || height <= 0) {
+        return;
+    }
+
+    set_game_projection(width, height, camera, config);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glLineWidth(3.0F);
+    glBegin(GL_LINES);
+    glColor4f(0.95F, 0.24F, 0.22F, 0.98F);
+    glVertex3f(origin.x, origin.y, origin.z);
+    glVertex3f(origin.x + 72.0F, origin.y, origin.z);
+    glColor4f(0.26F, 0.95F, 0.38F, 0.98F);
+    glVertex3f(origin.x, origin.y, origin.z);
+    glVertex3f(origin.x, origin.y + 72.0F, origin.z);
+    glColor4f(0.30F, 0.50F, 1.0F, 0.98F);
+    glVertex3f(origin.x, origin.y, origin.z);
+    glVertex3f(origin.x, origin.y, origin.z + 72.0F);
+    glEnd();
+    glLineWidth(1.0F);
 }
 
 } // namespace undecedent

@@ -35,6 +35,7 @@ SectorSurfaceDisplacement& displacement_for_surface(SectorPlane& sector, SectorS
 
 void normalize_displacement(SectorPlane& sector, SectorSurfaceKind surface);
 void ensure_displacement_samples(SectorPlane& sector, SectorSurfaceKind surface);
+void set_displacement_resolution(SectorPlane& sector, SectorSurfaceKind surface, int resolution);
 std::vector<SurfaceSampleTriangle> build_surface_sample_triangles(
     const SectorPlane& sector,
     SectorSurfaceKind surface

@@ -3,6 +3,8 @@
 #include "undecedent/csg.hpp"
 #include "undecedent/displacement.hpp"
 #include "undecedent/editor_slice.hpp"
+#include "undecedent/math3d.hpp"
+#include "undecedent/runtime_pick.hpp"
 #include "undecedent/screen_draw.hpp"
 #include "undecedent/triangulator.hpp"
 
@@ -10,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -28,12 +31,77 @@ constexpr float kEditorScrollLogStrength = 4.0F;
 constexpr float kEditorMaxScrollDelta = 64.0F;
 constexpr float kEditorCameraSmoothRate = 14.0F;
 constexpr float kCloseVertexPixels = 12.0F;
+constexpr float kEntityPickPixels = 14.0F;
+constexpr float kEntityPickRadius = 12.0F;
+constexpr float kGizmoLength = 72.0F;
+constexpr float kGizmoPickRadius = 8.0F;
+constexpr float kEntityMoveStep = 8.0F;
 constexpr std::size_t kEditorHistoryLimit = 128;
 
 void trim_history_stack(std::vector<EditorHistorySnapshot>& stack) {
     if (stack.size() > kEditorHistoryLimit) {
         stack.erase(stack.begin(), stack.begin() + static_cast<std::ptrdiff_t>(stack.size() - kEditorHistoryLimit));
     }
+}
+
+Vec3 selected_axis_vector(const TranslationGizmoAxis axis) {
+    switch (axis) {
+    case TranslationGizmoAxis::X: return Vec3{1.0F, 0.0F, 0.0F};
+    case TranslationGizmoAxis::Y: return Vec3{0.0F, 1.0F, 0.0F};
+    case TranslationGizmoAxis::Z: return Vec3{0.0F, 0.0F, 1.0F};
+    case TranslationGizmoAxis::None: break;
+    }
+    return Vec3{0.0F, 0.0F, 0.0F};
+}
+
+float distance_to_ray(const Vec3 point, const Vec3 origin, const Vec3 direction, float& out_t) {
+    const Vec3 relative = sub_vec3(point, origin);
+    out_t = dot_vec3(relative, direction);
+    if (out_t < 0.0F) {
+        return std::numeric_limits<float>::max();
+    }
+    const Vec3 closest = add_vec3(origin, mul_vec3(direction, out_t));
+    const Vec3 delta = sub_vec3(point, closest);
+    return std::sqrt(dot_vec3(delta, delta));
+}
+
+bool closest_ray_axis_t(
+    const Vec3 ray_origin,
+    const Vec3 ray_direction,
+    const Vec3 axis_origin,
+    const Vec3 axis_direction,
+    float& out_t,
+    float& out_distance
+) {
+    const Vec3 w0 = sub_vec3(ray_origin, axis_origin);
+    const float a = dot_vec3(ray_direction, ray_direction);
+    const float b = dot_vec3(ray_direction, axis_direction);
+    const float c = dot_vec3(axis_direction, axis_direction);
+    const float d = dot_vec3(ray_direction, w0);
+    const float e = dot_vec3(axis_direction, w0);
+    const float denom = (a * c) - (b * b);
+    if (std::abs(denom) <= 0.0001F) {
+        return false;
+    }
+    const float ray_t = ((b * e) - (c * d)) / denom;
+    const float axis_t = ((a * e) - (b * d)) / denom;
+    if (ray_t < 0.0F) {
+        return false;
+    }
+    const Vec3 ray_point = add_vec3(ray_origin, mul_vec3(ray_direction, ray_t));
+    const Vec3 axis_point = add_vec3(axis_origin, mul_vec3(axis_direction, axis_t));
+    const Vec3 delta = sub_vec3(ray_point, axis_point);
+    out_t = axis_t;
+    out_distance = std::sqrt(dot_vec3(delta, delta));
+    return true;
+}
+
+Vec3 normalized_sun_direction(const Vec3 direction) {
+    const Vec3 normalized = normalize_vec3(direction);
+    if (dot_vec3(normalized, normalized) <= 0.0001F) {
+        return WorldLighting{}.sun_direction;
+    }
+    return normalized;
 }
 
 } // namespace
@@ -305,6 +373,448 @@ void clear_selection_outside_slice(EditorWorld& editor_world) {
     }
 }
 
+bool same_selected_entity(const SelectedEntityRef a, const SelectedEntityRef b) {
+    return a.kind == b.kind && a.point_light_id == b.point_light_id;
+}
+
+PointLight* selected_point_light(EditorWorld& editor_world) {
+    if (editor_world.selected_entity.kind != SelectedEntityKind::PointLight ||
+        editor_world.selected_entity.point_light_id == 0) {
+        return nullptr;
+    }
+    for (PointLight& light : editor_world.point_lights) {
+        if (light.id == editor_world.selected_entity.point_light_id) {
+            return &light;
+        }
+    }
+    return nullptr;
+}
+
+const PointLight* selected_point_light(const EditorWorld& editor_world) {
+    if (editor_world.selected_entity.kind != SelectedEntityKind::PointLight ||
+        editor_world.selected_entity.point_light_id == 0) {
+        return nullptr;
+    }
+    for (const PointLight& light : editor_world.point_lights) {
+        if (light.id == editor_world.selected_entity.point_light_id) {
+            return &light;
+        }
+    }
+    return nullptr;
+}
+
+void clear_invalid_entity_selection(EditorWorld& editor_world) {
+    switch (editor_world.selected_entity.kind) {
+    case SelectedEntityKind::None:
+    case SelectedEntityKind::SunLight:
+        return;
+    case SelectedEntityKind::PlayerSpawn:
+        if (!editor_world.player_spawn.set) {
+            editor_world.selected_entity = {};
+        }
+        return;
+    case SelectedEntityKind::PointLight:
+        if (selected_point_light(editor_world) == nullptr) {
+            editor_world.selected_entity = {};
+        }
+        return;
+    }
+}
+
+void select_entity(EditorWorld& editor_world, SelectedEntityRef entity) {
+    ensure_editor_stable_ids(editor_world);
+    if (entity.kind == SelectedEntityKind::PlayerSpawn && !editor_world.player_spawn.set) {
+        entity = {};
+    } else if (entity.kind == SelectedEntityKind::PointLight) {
+        const bool exists = std::any_of(
+            editor_world.point_lights.begin(),
+            editor_world.point_lights.end(),
+            [entity](const PointLight& light) {
+                return light.id == entity.point_light_id;
+            }
+        );
+        if (!exists) {
+            entity = {};
+        }
+    }
+    editor_world.selected_entity = entity;
+}
+
+void clear_entity_selection(EditorWorld& editor_world) {
+    editor_world.selected_entity = {};
+}
+
+bool selected_entity_position(const EditorWorld& editor_world, Vec3& out_position) {
+    switch (editor_world.selected_entity.kind) {
+    case SelectedEntityKind::PlayerSpawn:
+        if (!editor_world.player_spawn.set) {
+            return false;
+        }
+        out_position = editor_world.player_spawn.position;
+        return true;
+    case SelectedEntityKind::PointLight:
+        if (const PointLight* light = selected_point_light(editor_world)) {
+            out_position = light->position;
+            return true;
+        }
+        return false;
+    case SelectedEntityKind::None:
+    case SelectedEntityKind::SunLight:
+        return false;
+    }
+    return false;
+}
+
+bool move_selected_entity(EditorWorld& editor_world, const Vec3 position) {
+    switch (editor_world.selected_entity.kind) {
+    case SelectedEntityKind::PlayerSpawn:
+        if (!editor_world.player_spawn.set) {
+            return false;
+        }
+        editor_world.player_spawn.position = position;
+        mark_entities_dirty(editor_world);
+        return true;
+    case SelectedEntityKind::PointLight:
+        if (PointLight* light = selected_point_light(editor_world)) {
+            light->position = position;
+            mark_entities_dirty(editor_world);
+            return true;
+        }
+        return false;
+    case SelectedEntityKind::None:
+    case SelectedEntityKind::SunLight:
+        return false;
+    }
+    return false;
+}
+
+bool delete_selected_entity(EditorWorld& editor_world) {
+    switch (editor_world.selected_entity.kind) {
+    case SelectedEntityKind::PlayerSpawn:
+        if (!editor_world.player_spawn.set) {
+            return false;
+        }
+        push_undo_snapshot(editor_world, "delete player spawn");
+        editor_world.player_spawn = {};
+        clear_entity_selection(editor_world);
+        mark_entities_dirty(editor_world);
+        return true;
+    case SelectedEntityKind::PointLight: {
+        const std::uint64_t id = editor_world.selected_entity.point_light_id;
+        const auto it = std::find_if(
+            editor_world.point_lights.begin(),
+            editor_world.point_lights.end(),
+            [id](const PointLight& light) {
+                return light.id == id;
+            }
+        );
+        if (it == editor_world.point_lights.end()) {
+            clear_invalid_entity_selection(editor_world);
+            return false;
+        }
+        push_undo_snapshot(editor_world, "delete point light");
+        editor_world.point_lights.erase(it);
+        clear_entity_selection(editor_world);
+        mark_entities_dirty(editor_world);
+        return true;
+    }
+    case SelectedEntityKind::SunLight:
+    case SelectedEntityKind::None:
+        return false;
+    }
+    return false;
+}
+
+bool adjust_selected_entity_property(EditorWorld& editor_world, const EntityProperty property, const float delta) {
+    const SelectedEntityKind kind = editor_world.selected_entity.kind;
+    if (kind == SelectedEntityKind::None) {
+        return false;
+    }
+
+    push_undo_snapshot(editor_world, "entity property");
+    bool changed = true;
+    switch (kind) {
+    case SelectedEntityKind::PlayerSpawn:
+        if (!editor_world.player_spawn.set) {
+            changed = false;
+            break;
+        }
+        switch (property) {
+        case EntityProperty::PositionX: editor_world.player_spawn.position.x += delta; break;
+        case EntityProperty::PositionY: editor_world.player_spawn.position.y += delta; break;
+        case EntityProperty::PositionZ: editor_world.player_spawn.position.z += delta; break;
+        case EntityProperty::Yaw: editor_world.player_spawn.yaw += delta; break;
+        default: changed = false; break;
+        }
+        if (changed) {
+            mark_entities_dirty(editor_world);
+        }
+        break;
+    case SelectedEntityKind::PointLight:
+        if (PointLight* light = selected_point_light(editor_world)) {
+            switch (property) {
+            case EntityProperty::PositionX: light->position.x += delta; break;
+            case EntityProperty::PositionY: light->position.y += delta; break;
+            case EntityProperty::PositionZ: light->position.z += delta; break;
+            case EntityProperty::ColorR: light->color.x = std::max(0.0F, light->color.x + delta); break;
+            case EntityProperty::ColorG: light->color.y = std::max(0.0F, light->color.y + delta); break;
+            case EntityProperty::ColorB: light->color.z = std::max(0.0F, light->color.z + delta); break;
+            case EntityProperty::Radius: light->radius = std::max(1.0F, light->radius + delta); break;
+            case EntityProperty::Intensity: light->intensity = std::max(0.0F, light->intensity + delta); break;
+            default: changed = false; break;
+            }
+            if (changed) {
+                mark_entities_dirty(editor_world);
+            }
+        } else {
+            changed = false;
+        }
+        break;
+    case SelectedEntityKind::SunLight:
+        switch (property) {
+        case EntityProperty::SunEnabled:
+            editor_world.world_lighting.sun_enabled = !editor_world.world_lighting.sun_enabled;
+            break;
+        case EntityProperty::SunDirectionX:
+            editor_world.world_lighting.sun_direction.x += delta;
+            editor_world.world_lighting.sun_direction = normalized_sun_direction(editor_world.world_lighting.sun_direction);
+            break;
+        case EntityProperty::SunDirectionY:
+            editor_world.world_lighting.sun_direction.y += delta;
+            editor_world.world_lighting.sun_direction = normalized_sun_direction(editor_world.world_lighting.sun_direction);
+            break;
+        case EntityProperty::SunDirectionZ:
+            editor_world.world_lighting.sun_direction.z += delta;
+            editor_world.world_lighting.sun_direction = normalized_sun_direction(editor_world.world_lighting.sun_direction);
+            break;
+        case EntityProperty::ColorR:
+            editor_world.world_lighting.sun_color.x = std::max(0.0F, editor_world.world_lighting.sun_color.x + delta);
+            break;
+        case EntityProperty::ColorG:
+            editor_world.world_lighting.sun_color.y = std::max(0.0F, editor_world.world_lighting.sun_color.y + delta);
+            break;
+        case EntityProperty::ColorB:
+            editor_world.world_lighting.sun_color.z = std::max(0.0F, editor_world.world_lighting.sun_color.z + delta);
+            break;
+        case EntityProperty::Intensity:
+            editor_world.world_lighting.sun_intensity = std::max(0.0F, editor_world.world_lighting.sun_intensity + delta);
+            break;
+        default:
+            changed = false;
+            break;
+        }
+        if (changed) {
+            editor_world.dirty_metadata = true;
+        }
+        break;
+    case SelectedEntityKind::None:
+        changed = false;
+        break;
+    }
+
+    if (!changed && !editor_world.undo_stack.empty()) {
+        editor_world.undo_stack.pop_back();
+    }
+    return changed;
+}
+
+EntityPick pick_editor_entity_2d(
+    const EditorWorld& editor_world,
+    const EditorCamera& camera,
+    const int width,
+    const int height,
+    const float screen_x,
+    const float screen_y,
+    const float player_eye_height
+) {
+    EntityPick best{};
+    best.distance = kEntityPickPixels * kEntityPickPixels;
+    const auto consider = [&](const SelectedEntityRef entity, const Vec3 position, const float slice_height) {
+        const float visible_band = std::max(1.0F, editor_grid_world_step(camera.zoom) * 0.5F);
+        if (std::abs(slice_height - editor_world.slice_z) > visible_band) {
+            return;
+        }
+        const float x = world_to_screen_x(position.x, width, camera);
+        const float y = world_to_screen_y(position.z, height, camera);
+        const float dx = x - screen_x;
+        const float dy = y - screen_y;
+        const float distance = (dx * dx) + (dy * dy);
+        if (distance <= best.distance) {
+            best.hit = true;
+            best.entity = entity;
+            best.distance = distance;
+        }
+    };
+
+    if (editor_world.player_spawn.set) {
+        consider(
+            SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0},
+            editor_world.player_spawn.position,
+            editor_world.player_spawn.position.y - player_eye_height
+        );
+    }
+    for (const PointLight& light : editor_world.point_lights) {
+        consider(SelectedEntityRef{SelectedEntityKind::PointLight, light.id}, light.position, light.position.y);
+    }
+    return best;
+}
+
+EntityPick pick_editor_entity_3d(
+    const EditorWorld& editor_world,
+    const GameCamera& camera,
+    const int width,
+    const int height,
+    const float screen_x,
+    const float screen_y,
+    const GameRenderConfig& config
+) {
+    EntityPick best{};
+    best.distance = std::numeric_limits<float>::max();
+    const Vec3 origin{camera.x, camera.y, camera.z};
+    const Vec3 direction = camera_ray_direction(camera, width, height, screen_x, screen_y, config.fov_y_degrees);
+    const auto consider = [&](const SelectedEntityRef entity, const Vec3 position) {
+        float ray_t = 0.0F;
+        const float distance = distance_to_ray(position, origin, direction, ray_t);
+        const float threshold = std::max(kEntityPickRadius, ray_t * 0.018F);
+        if (distance <= threshold && ray_t < best.distance) {
+            best.hit = true;
+            best.entity = entity;
+            best.distance = ray_t;
+        }
+    };
+
+    if (editor_world.player_spawn.set) {
+        consider(SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0}, editor_world.player_spawn.position);
+    }
+    for (const PointLight& light : editor_world.point_lights) {
+        consider(SelectedEntityRef{SelectedEntityKind::PointLight, light.id}, light.position);
+    }
+    return best;
+}
+
+TranslationGizmoPick pick_translation_gizmo(
+    const EditorWorld& editor_world,
+    const GameCamera& camera,
+    const int width,
+    const int height,
+    const float screen_x,
+    const float screen_y,
+    const GameRenderConfig& config
+) {
+    Vec3 origin{};
+    if (!selected_entity_position(editor_world, origin)) {
+        return {};
+    }
+
+    const Vec3 ray_origin{camera.x, camera.y, camera.z};
+    const Vec3 ray_direction = camera_ray_direction(camera, width, height, screen_x, screen_y, config.fov_y_degrees);
+    TranslationGizmoPick best{};
+    float best_distance = std::numeric_limits<float>::max();
+    for (const TranslationGizmoAxis axis : {TranslationGizmoAxis::X, TranslationGizmoAxis::Y, TranslationGizmoAxis::Z}) {
+        const Vec3 axis_direction = selected_axis_vector(axis);
+        float axis_t = 0.0F;
+        float distance = 0.0F;
+        if (!closest_ray_axis_t(ray_origin, ray_direction, origin, axis_direction, axis_t, distance)) {
+            continue;
+        }
+        if (axis_t < 0.0F || axis_t > kGizmoLength) {
+            continue;
+        }
+        if (distance <= kGizmoPickRadius && distance < best_distance) {
+            best.hit = true;
+            best.axis = axis;
+            best.axis_t = axis_t;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
+
+bool start_translation_gizmo_drag(
+    EditorWorld& editor_world,
+    const GameCamera& camera,
+    const int width,
+    const int height,
+    const float screen_x,
+    const float screen_y,
+    const GameRenderConfig& config
+) {
+    const TranslationGizmoPick pick = pick_translation_gizmo(editor_world, camera, width, height, screen_x, screen_y, config);
+    if (!pick.hit) {
+        return false;
+    }
+    Vec3 position{};
+    if (!selected_entity_position(editor_world, position)) {
+        return false;
+    }
+    push_undo_snapshot(editor_world, "entity move");
+    editor_world.has_dragged_entity_gizmo = true;
+    editor_world.dragged_entity_axis = pick.axis;
+    editor_world.dragged_entity_moved = false;
+    editor_world.entity_drag_start_axis_t = pick.axis_t;
+    editor_world.entity_drag_start_position = position;
+    editor_world.entity_drag_current_position = position;
+    return true;
+}
+
+bool update_translation_gizmo_drag(
+    EditorWorld& editor_world,
+    const GameCamera& camera,
+    const int width,
+    const int height,
+    const float screen_x,
+    const float screen_y,
+    const GameRenderConfig& config,
+    const bool fine
+) {
+    if (!editor_world.has_dragged_entity_gizmo) {
+        return false;
+    }
+
+    const Vec3 ray_origin{camera.x, camera.y, camera.z};
+    const Vec3 ray_direction = camera_ray_direction(camera, width, height, screen_x, screen_y, config.fov_y_degrees);
+    const Vec3 axis_direction = selected_axis_vector(editor_world.dragged_entity_axis);
+    float axis_t = 0.0F;
+    float distance = 0.0F;
+    if (!closest_ray_axis_t(
+            ray_origin,
+            ray_direction,
+            editor_world.entity_drag_start_position,
+            axis_direction,
+            axis_t,
+            distance
+        )) {
+        return false;
+    }
+
+    const float step = fine ? 1.0F : kEntityMoveStep;
+    const float snapped_delta = std::round((axis_t - editor_world.entity_drag_start_axis_t) / step) * step;
+    const Vec3 next_position =
+        add_vec3(editor_world.entity_drag_start_position, mul_vec3(axis_direction, snapped_delta));
+    if (std::abs(next_position.x - editor_world.entity_drag_current_position.x) <= kGeometryEpsilon &&
+        std::abs(next_position.y - editor_world.entity_drag_current_position.y) <= kGeometryEpsilon &&
+        std::abs(next_position.z - editor_world.entity_drag_current_position.z) <= kGeometryEpsilon) {
+        return true;
+    }
+    if (move_selected_entity(editor_world, next_position)) {
+        editor_world.entity_drag_current_position = next_position;
+        editor_world.dragged_entity_moved = true;
+    }
+    return true;
+}
+
+void finish_translation_gizmo_drag(EditorWorld& editor_world) {
+    if (!editor_world.has_dragged_entity_gizmo) {
+        return;
+    }
+    if (!editor_world.dragged_entity_moved && !editor_world.undo_stack.empty()) {
+        editor_world.undo_stack.pop_back();
+    }
+    editor_world.has_dragged_entity_gizmo = false;
+    editor_world.dragged_entity_moved = false;
+    editor_world.dragged_entity_axis = TranslationGizmoAxis::None;
+}
+
 bool draft_contains_point(const EditorWorld& editor_world, const Vec2 point) {
     return std::any_of(
         editor_world.draft_vertices.begin(),
@@ -557,8 +1067,10 @@ EditorHistorySnapshot make_history_snapshot(const EditorWorld& editor_world) {
         editor_world.selected_sectors,
         editor_world.player_spawn,
         editor_world.point_lights,
+        editor_world.world_lighting,
         editor_world.slice_z,
         editor_world.selected_sector,
+        editor_world.selected_entity,
     };
 }
 
@@ -578,8 +1090,10 @@ void restore_history_snapshot(EditorWorld& editor_world, const EditorHistorySnap
     editor_world.selected_sectors = snapshot.selected_sectors;
     editor_world.player_spawn = snapshot.player_spawn;
     editor_world.point_lights = snapshot.point_lights;
+    editor_world.world_lighting = snapshot.world_lighting;
     editor_world.slice_z = snapshot.slice_z;
     editor_world.selected_sector = snapshot.selected_sector;
+    editor_world.selected_entity = snapshot.selected_entity;
     editor_world.slice_scroll_remainder = 0.0F;
     editor_world.draft_vertices.clear();
     editor_world.draft_result = {};
@@ -589,9 +1103,13 @@ void restore_history_snapshot(EditorWorld& editor_world, const EditorHistorySnap
     editor_world.dragged_committed_refs.clear();
     editor_world.has_dragged_committed_vertex = false;
     editor_world.dragged_committed_vertex_moved = false;
+    editor_world.has_dragged_entity_gizmo = false;
+    editor_world.dragged_entity_moved = false;
+    editor_world.dragged_entity_axis = TranslationGizmoAxis::None;
     editor_world.has_hovered_committed_vertex = false;
     editor_world.plane_tool = PlaneToolMode::None;
     clear_selection_outside_slice(editor_world);
+    clear_invalid_entity_selection(editor_world);
     rebuild_runtime_geometry(editor_world);
 }
 
@@ -652,10 +1170,17 @@ void place_entity(EditorWorld& editor_world, const Vec3 position, const float ya
         editor_world.player_spawn.position = position;
         editor_world.player_spawn.yaw = yaw;
         editor_world.player_spawn.set = true;
+        ensure_editor_stable_ids(editor_world);
+        select_entity(editor_world, SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0});
         std::cout << "Placed player spawn at " << position.x << ", " << position.y << ", " << position.z << '\n';
         break;
     case EntityPlacementType::PointLight:
         editor_world.point_lights.push_back(default_point_light_at(position));
+        ensure_editor_stable_ids(editor_world);
+        select_entity(
+            editor_world,
+            SelectedEntityRef{SelectedEntityKind::PointLight, editor_world.point_lights.back().id}
+        );
         std::cout << "Placed point light at " << position.x << ", " << position.y << ", " << position.z << '\n';
         break;
     }
@@ -677,6 +1202,8 @@ void place_entity_at_origin(
     editor_world.player_spawn.position = Vec3{origin.x, origin.y + player_eye_height, origin.z};
     editor_world.player_spawn.yaw = yaw;
     editor_world.player_spawn.set = true;
+    ensure_editor_stable_ids(editor_world);
+    select_entity(editor_world, SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0});
     mark_entities_dirty(editor_world);
     std::cout << "Placed player spawn origin at " << origin.x << ", " << origin.y << ", " << origin.z << '\n';
 }
@@ -876,12 +1403,8 @@ bool adjust_selected_sector_subdivision(EditorWorld& editor_world, const int del
             sector.ceiling_displacement.enabled = false;
             sector.ceiling_displacement.samples.clear();
         } else {
-            sector.floor_displacement.enabled = true;
-            sector.floor_displacement.resolution = target.next;
-            ensure_displacement_samples(sector, SectorSurfaceKind::Floor);
-            sector.ceiling_displacement.enabled = true;
-            sector.ceiling_displacement.resolution = target.next;
-            ensure_displacement_samples(sector, SectorSurfaceKind::Ceiling);
+            set_displacement_resolution(sector, SectorSurfaceKind::Floor, target.next);
+            set_displacement_resolution(sector, SectorSurfaceKind::Ceiling, target.next);
         }
         mark_sector_dirty(editor_world, static_cast<std::size_t>(target.sector_index));
     }

@@ -109,4 +109,11 @@ struct PointLight {
     float intensity = 1.5F;
 };
 
+struct WorldLighting {
+    bool sun_enabled = true;
+    Vec3 sun_direction{-0.348155F, -0.870388F, -0.348155F};
+    Vec3 sun_color{1.0F, 0.94F, 0.78F};
+    float sun_intensity = 0.65F;
+};
+
 } // namespace undecedent

@@ -21,6 +21,7 @@ struct LoadMapResult {
     std::vector<SectorPlane> sectors;
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
+    WorldLighting world_lighting;
 };
 
 struct MapDirtyState {
@@ -43,10 +44,25 @@ SaveMapResult save_map_file(
     const std::vector<PointLight>& point_lights,
     const std::filesystem::path& path
 );
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
+    const std::filesystem::path& path
+);
 SaveMapResult save_map_file_dirty(
     const std::vector<SectorPlane>& sectors,
     PlayerSpawn player_spawn,
     const std::vector<PointLight>& point_lights,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+);
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
     const MapDirtyState& dirty_state,
     const std::filesystem::path& path
 );

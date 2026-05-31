@@ -2,6 +2,7 @@
 #include "undecedent/displacement.hpp"
 #include "undecedent/physics.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -22,6 +23,13 @@ PolygonLoop loop(std::initializer_list<Vec2> vertices) {
 void expect(const bool condition, const char* message) {
     if (!condition) {
         std::cerr << message << '\n';
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+void expect_near(const float actual, const float expected, const float tolerance, const char* message) {
+    if (std::abs(actual - expected) > tolerance) {
+        std::cerr << message << " (actual=" << actual << ", expected=" << expected << ")\n";
         std::exit(EXIT_FAILURE);
     }
 }
@@ -89,6 +97,25 @@ int main() {
         state = undecedent::move_player(world, state, Vec3{2, 0, 0}, PlayerPhysicsConfig{0.0F, 6.0F, 3.0F, 18.0F});
         expect(state.position.x == 3.0F, "player should move horizontally on a sloped floor");
         expect(state.position.y > 4.0F, "player should step up to the sampled sloped floor");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {12, 0}, {12, 10}, {0, 10}}));
+        sectors.front().floor_displacement.resolution = 1;
+        undecedent::ensure_displacement_samples(sectors.front(), undecedent::SectorSurfaceKind::Floor);
+        for (undecedent::SectorDisplacementSample& sample : sectors.front().floor_displacement.samples) {
+            sample.offset = sample.position.x;
+        }
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        PlayerPhysicsState state{Vec3{3, 7, 5}, -1};
+        state = undecedent::move_player(
+            world,
+            state,
+            Vec3{2, 0, 0},
+            PlayerPhysicsConfig{2.0F, 8.0F, 4.0F, 18.0F, 0.5F}
+        );
+        expect(state.position.x == 5.0F, "full-radius body should still move across a sloped floor");
+        expect_near(state.position.y, 9.5F, 0.01F, "floor support should come from the foot contact radius");
     }
 
     {

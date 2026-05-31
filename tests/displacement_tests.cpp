@@ -1,6 +1,7 @@
 #include "undecedent/displacement.hpp"
 #include "undecedent/triangulator.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -18,6 +19,13 @@ PolygonLoop loop(std::initializer_list<Vec2> vertices) {
 void expect(const bool condition, const char* message) {
     if (!condition) {
         std::cerr << message << '\n';
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+void expect_near(const float actual, const float expected, const float tolerance, const char* message) {
+    if (std::abs(actual - expected) > tolerance) {
+        std::cerr << message << " (actual=" << actual << ", expected=" << expected << ")\n";
         std::exit(EXIT_FAILURE);
     }
 }
@@ -44,13 +52,34 @@ int main() {
 
     {
         SectorPlane sector = sector_with_triangles();
-        sector.floor_displacement.resolution = 2;
-        undecedent::ensure_displacement_samples(sector, undecedent::SectorSurfaceKind::Floor);
+        undecedent::set_displacement_resolution(sector, undecedent::SectorSurfaceKind::Floor, 2);
         expect(sector.floor_displacement.enabled, "ensuring samples should enable floor displacement");
         expect(!sector.floor_displacement.samples.empty(), "enabled displacement should create control samples");
         const std::vector<undecedent::SurfaceSampleTriangle> displaced =
             undecedent::build_surface_sample_triangles(sector, undecedent::SectorSurfaceKind::Floor);
         expect(displaced.size() == sector.triangles.size() * 4, "resolution 2 should split each triangle into four");
+    }
+
+    {
+        SectorPlane sector = sector_with_triangles();
+        sector.floor_displacement.resolution = 3;
+        undecedent::ensure_displacement_samples(sector, undecedent::SectorSurfaceKind::Floor);
+        const std::size_t fine_count = sector.floor_displacement.samples.size();
+        for (undecedent::SectorDisplacementSample& sample : sector.floor_displacement.samples) {
+            sample.offset = sample.position.x;
+        }
+
+        undecedent::set_displacement_resolution(sector, undecedent::SectorSurfaceKind::Floor, 2);
+        expect(sector.floor_displacement.samples.size() < fine_count, "lower subdivision should reduce control samples");
+
+        bool found_midpoint = false;
+        for (const undecedent::SectorDisplacementSample& sample : sector.floor_displacement.samples) {
+            if (std::abs(sample.position.x - 8.0F) <= 0.001F && std::abs(sample.position.y) <= 0.001F) {
+                found_midpoint = true;
+                expect_near(sample.offset, 8.0F, 0.01F, "decimated midpoint should interpolate old surface offset");
+            }
+        }
+        expect(found_midpoint, "lower subdivision should generate edge midpoint sample");
     }
 
     {

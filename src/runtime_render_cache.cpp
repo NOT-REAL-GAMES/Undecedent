@@ -156,6 +156,12 @@ Vec3 runtime_triangle_lighting_normal(const RuntimeTriangle& triangle) {
 }
 
 void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const RuntimeWorld& world) {
+    if (glGenBuffers == nullptr || glBindBuffer == nullptr || glBufferData == nullptr) {
+        render_cache.total_vertices = 0;
+        render_cache.sector_ranges.clear();
+        return;
+    }
+
     std::vector<RuntimeRenderVertex> vertices;
     const std::map<SmoothNormalKey, Vec3> smooth_normals = build_smooth_normals(world);
     render_cache.sector_ranges.assign(world.sectors.size(), RuntimeRenderRange{});
@@ -189,6 +195,11 @@ void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const Runtim
 }
 
 void destroy_runtime_render_cache(RuntimeRenderCache& render_cache) {
+    if (glDeleteBuffers == nullptr) {
+        render_cache = {};
+        return;
+    }
+
     if (render_cache.vertex_buffer != 0) {
         glDeleteBuffers(1, &render_cache.vertex_buffer);
     }

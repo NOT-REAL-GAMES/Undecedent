@@ -9,6 +9,7 @@ struct PlayerPhysicsConfig {
     float height = 56.0F;
     float eye_height = 48.0F;
     float max_step_height = 18.0F;
+    float foot_contact_radius = 2.0F;
 };
 
 struct PlayerPhysicsState {

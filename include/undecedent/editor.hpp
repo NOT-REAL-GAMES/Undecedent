@@ -1,7 +1,9 @@
 #pragma once
 
 #include "undecedent/geometry.hpp"
+#include "undecedent/game_camera.hpp"
 #include "undecedent/map_io.hpp"
+#include "undecedent/runtime_render.hpp"
 #include "undecedent/runtime_render_cache.hpp"
 #include "undecedent/runtime_world.hpp"
 
@@ -34,6 +36,53 @@ enum class EntityPlacementType {
     PointLight,
 };
 
+enum class SelectedEntityKind {
+    None,
+    PlayerSpawn,
+    PointLight,
+    SunLight,
+};
+
+enum class TranslationGizmoAxis {
+    None,
+    X,
+    Y,
+    Z,
+};
+
+enum class EntityProperty {
+    PositionX,
+    PositionY,
+    PositionZ,
+    Yaw,
+    ColorR,
+    ColorG,
+    ColorB,
+    Radius,
+    Intensity,
+    SunDirectionX,
+    SunDirectionY,
+    SunDirectionZ,
+    SunEnabled,
+};
+
+struct SelectedEntityRef {
+    SelectedEntityKind kind = SelectedEntityKind::None;
+    std::uint64_t point_light_id = 0;
+};
+
+struct EntityPick {
+    bool hit = false;
+    SelectedEntityRef entity;
+    float distance = 0.0F;
+};
+
+struct TranslationGizmoPick {
+    bool hit = false;
+    TranslationGizmoAxis axis = TranslationGizmoAxis::None;
+    float axis_t = 0.0F;
+};
+
 struct SurfacePick {
     bool hit = false;
     int sector_id = -1;
@@ -54,8 +103,10 @@ struct EditorHistorySnapshot {
     std::set<int> selected_sectors;
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
+    WorldLighting world_lighting;
     float slice_z = 0.0F;
     int selected_sector = -1;
+    SelectedEntityRef selected_entity;
 };
 
 struct EditorWorld {
@@ -69,14 +120,19 @@ struct EditorWorld {
     std::set<std::uint64_t> dirty_sector_ids;
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
+    WorldLighting world_lighting;
     RuntimeWorld runtime_world;
     RuntimeRenderCache runtime_render_cache;
     TriangulationResult draft_result;
+    SelectedEntityRef selected_entity;
     Vec2 snapped_mouse;
     Vec2 hovered_committed_vertex;
     Vec2 dragged_committed_vertex;
+    Vec3 entity_drag_start_position;
+    Vec3 entity_drag_current_position;
     float slice_z = 0.0F;
     float slice_scroll_remainder = 0.0F;
+    float entity_drag_start_axis_t = 0.0F;
     int dragged_draft_vertex = -1;
     int selected_sector = -1;
     EntityPlacementType entity_placement = EntityPlacementType::PlayerSpawn;
@@ -86,8 +142,11 @@ struct EditorWorld {
     float displacement_brush_radius = 64.0F;
     bool has_hovered_committed_vertex = false;
     bool has_dragged_committed_vertex = false;
+    bool has_dragged_entity_gizmo = false;
     bool dragged_draft_vertex_moved = false;
     bool dragged_committed_vertex_moved = false;
+    bool dragged_entity_moved = false;
+    TranslationGizmoAxis dragged_entity_axis = TranslationGizmoAxis::None;
     bool dirty_entities = false;
     bool dirty_metadata = false;
     bool dirty_materials = false;
@@ -118,6 +177,64 @@ std::vector<int> selected_sector_indices(const EditorWorld& editor_world);
 bool sector_visible_in_slice(const EditorWorld& editor_world, const SectorPlane& sector);
 bool sector_on_active_floor(const EditorWorld& editor_world, const SectorPlane& sector);
 void clear_selection_outside_slice(EditorWorld& editor_world);
+
+bool same_selected_entity(SelectedEntityRef a, SelectedEntityRef b);
+void select_entity(EditorWorld& editor_world, SelectedEntityRef entity);
+void clear_entity_selection(EditorWorld& editor_world);
+PointLight* selected_point_light(EditorWorld& editor_world);
+const PointLight* selected_point_light(const EditorWorld& editor_world);
+bool selected_entity_position(const EditorWorld& editor_world, Vec3& out_position);
+bool move_selected_entity(EditorWorld& editor_world, Vec3 position);
+bool delete_selected_entity(EditorWorld& editor_world);
+bool adjust_selected_entity_property(EditorWorld& editor_world, EntityProperty property, float delta);
+void clear_invalid_entity_selection(EditorWorld& editor_world);
+EntityPick pick_editor_entity_2d(
+    const EditorWorld& editor_world,
+    const EditorCamera& camera,
+    int width,
+    int height,
+    float screen_x,
+    float screen_y,
+    float player_eye_height
+);
+EntityPick pick_editor_entity_3d(
+    const EditorWorld& editor_world,
+    const GameCamera& camera,
+    int width,
+    int height,
+    float screen_x,
+    float screen_y,
+    const GameRenderConfig& config
+);
+TranslationGizmoPick pick_translation_gizmo(
+    const EditorWorld& editor_world,
+    const GameCamera& camera,
+    int width,
+    int height,
+    float screen_x,
+    float screen_y,
+    const GameRenderConfig& config
+);
+bool start_translation_gizmo_drag(
+    EditorWorld& editor_world,
+    const GameCamera& camera,
+    int width,
+    int height,
+    float screen_x,
+    float screen_y,
+    const GameRenderConfig& config
+);
+bool update_translation_gizmo_drag(
+    EditorWorld& editor_world,
+    const GameCamera& camera,
+    int width,
+    int height,
+    float screen_x,
+    float screen_y,
+    const GameRenderConfig& config,
+    bool fine
+);
+void finish_translation_gizmo_drag(EditorWorld& editor_world);
 
 bool draft_contains_point(const EditorWorld& editor_world, Vec2 point);
 bool draft_contains_point_except(const EditorWorld& editor_world, Vec2 point, int ignored_index);

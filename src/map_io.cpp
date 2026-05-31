@@ -40,6 +40,7 @@ constexpr std::uint32_t fourcc(const char a, const char b, const char c, const c
 constexpr std::uint32_t kChunkMeta = fourcc('M', 'E', 'T', 'A');
 constexpr std::uint32_t kChunkSector = fourcc('S', 'E', 'C', 'T');
 constexpr std::uint32_t kChunkEntities = fourcc('E', 'N', 'T', 'Y');
+constexpr std::uint32_t kChunkLighting = fourcc('L', 'I', 'T', 'E');
 constexpr std::uint32_t kChunkMaterials = fourcc('M', 'A', 'T', 'S');
 constexpr std::uint32_t kChunkEditorState = fourcc('E', 'D', 'S', 'T');
 
@@ -48,7 +49,7 @@ SaveMapResult save_error(const std::string& message) {
 }
 
 LoadMapResult load_error(const std::string& message) {
-    return LoadMapResult{false, message, {}, {}, {}};
+    return LoadMapResult{false, message, {}, {}, {}, {}};
 }
 
 std::uint32_t checksum_bytes(const std::vector<std::uint8_t>& bytes) {
@@ -140,6 +141,35 @@ bool read_float(std::istream& input, float& value, std::string& message) {
     }
 
     return true;
+}
+
+float vec3_length(const Vec3 value) {
+    return std::sqrt((value.x * value.x) + (value.y * value.y) + (value.z * value.z));
+}
+
+Vec3 normalized_or_default(const Vec3 value, const Vec3 fallback) {
+    const float length = vec3_length(value);
+    if (!std::isfinite(length) || length <= 0.0001F) {
+        return fallback;
+    }
+    return Vec3{value.x / length, value.y / length, value.z / length};
+}
+
+WorldLighting normalized_lighting(WorldLighting lighting) {
+    const WorldLighting defaults;
+    lighting.sun_direction = normalized_or_default(lighting.sun_direction, defaults.sun_direction);
+    if (!std::isfinite(lighting.sun_color.x) ||
+        !std::isfinite(lighting.sun_color.y) ||
+        !std::isfinite(lighting.sun_color.z)) {
+        lighting.sun_color = defaults.sun_color;
+    }
+    lighting.sun_color.x = std::max(lighting.sun_color.x, 0.0F);
+    lighting.sun_color.y = std::max(lighting.sun_color.y, 0.0F);
+    lighting.sun_color.z = std::max(lighting.sun_color.z, 0.0F);
+    if (!std::isfinite(lighting.sun_intensity) || lighting.sun_intensity < 0.0F) {
+        lighting.sun_intensity = defaults.sun_intensity;
+    }
+    return lighting;
 }
 
 bool parse_float_token(const std::string& token, float& value, std::string& message) {
@@ -374,7 +404,8 @@ void rebuild_exact_adjacency(std::vector<SectorPlane>& sectors) {
 LoadMapResult rebuild_loaded_sectors(
     std::vector<SectorPlane> sectors,
     const PlayerSpawn player_spawn,
-    std::vector<PointLight> point_lights
+    std::vector<PointLight> point_lights,
+    const WorldLighting world_lighting = {}
 ) {
     for (std::size_t i = 0; i < sectors.size(); ++i) {
         SectorPlane& sector = sectors[i];
@@ -391,7 +422,14 @@ LoadMapResult rebuild_loaded_sectors(
     }
 
     rebuild_exact_adjacency(sectors);
-    return LoadMapResult{true, "Loaded map.", std::move(sectors), player_spawn, std::move(point_lights)};
+    return LoadMapResult{
+        true,
+        "Loaded map.",
+        std::move(sectors),
+        player_spawn,
+        std::move(point_lights),
+        normalized_lighting(world_lighting)
+    };
 }
 
 void write_displacement(
@@ -814,6 +852,73 @@ std::string write_materials_payload() {
     return output.str();
 }
 
+std::string write_lighting_payload(const WorldLighting world_lighting) {
+    const WorldLighting lighting = normalized_lighting(world_lighting);
+    std::ostringstream output;
+    output << std::setprecision(std::numeric_limits<float>::max_digits10);
+    output << "lighting 1\n";
+    output << "sun "
+           << (lighting.sun_enabled ? 1 : 0) << ' '
+           << lighting.sun_direction.x << ' '
+           << lighting.sun_direction.y << ' '
+           << lighting.sun_direction.z << ' '
+           << lighting.sun_color.x << ' '
+           << lighting.sun_color.y << ' '
+           << lighting.sun_color.z << ' '
+           << lighting.sun_intensity << '\n';
+    return output.str();
+}
+
+bool read_lighting_payload(std::istream& input, WorldLighting& world_lighting, std::string& message) {
+    if (!read_expected(input, "lighting", message)) {
+        return false;
+    }
+    int version = 0;
+    if (!(input >> version) || version != 1) {
+        message = "Unsupported lighting chunk version.";
+        return false;
+    }
+    if (!read_expected(input, "sun", message)) {
+        return false;
+    }
+    int enabled = 0;
+    WorldLighting lighting;
+    if (!(input >> enabled)) {
+        message = "Expected sun enabled flag.";
+        return false;
+    }
+    if (enabled != 0 && enabled != 1) {
+        message = "Sun enabled flag must be 0 or 1.";
+        return false;
+    }
+    lighting.sun_enabled = enabled != 0;
+    if (!read_float(input, lighting.sun_direction.x, message) ||
+        !read_float(input, lighting.sun_direction.y, message) ||
+        !read_float(input, lighting.sun_direction.z, message) ||
+        !read_float(input, lighting.sun_color.x, message) ||
+        !read_float(input, lighting.sun_color.y, message) ||
+        !read_float(input, lighting.sun_color.z, message) ||
+        !read_float(input, lighting.sun_intensity, message)) {
+        return false;
+    }
+    if (lighting.sun_intensity < 0.0F) {
+        message = "Sun intensity must be non-negative.";
+        return false;
+    }
+    if (lighting.sun_color.x < 0.0F || lighting.sun_color.y < 0.0F || lighting.sun_color.z < 0.0F) {
+        message = "Sun color cannot be negative.";
+        return false;
+    }
+    world_lighting = normalized_lighting(lighting);
+
+    std::string trailing;
+    if (input >> trailing) {
+        message = "Unexpected trailing lighting token: " + trailing;
+        return false;
+    }
+    return true;
+}
+
 bool read_entities_payload(
     std::istream& input,
     PlayerSpawn& player_spawn,
@@ -936,12 +1041,14 @@ bool read_materials_payload(std::istream& input, std::string& message) {
 std::vector<ChunkRecord> build_chunk_records(
     std::vector<SectorPlane> sectors,
     PlayerSpawn player_spawn,
-    std::vector<PointLight> point_lights
+    std::vector<PointLight> point_lights,
+    const WorldLighting world_lighting
 ) {
     const std::uint64_t next_id = assign_missing_stable_ids(sectors, player_spawn, point_lights);
     std::vector<ChunkRecord> chunks;
     chunks.push_back(ChunkRecord{kChunkMeta, 0, 0, string_payload(write_meta_payload(next_id))});
     chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload())});
+    chunks.push_back(ChunkRecord{kChunkLighting, kChunkFlagOptional, 0, string_payload(write_lighting_payload(world_lighting))});
     chunks.push_back(ChunkRecord{kChunkEntities, 0, 0, string_payload(write_entities_payload(player_spawn, point_lights))});
     for (const SectorPlane& sector : sectors) {
         chunks.push_back(ChunkRecord{kChunkSector, 0, sector.id, string_payload(write_sector_payload(sector))});
@@ -1130,6 +1237,7 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
     bool saw_entities = false;
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
+    WorldLighting world_lighting;
     std::vector<SectorPlane> sectors;
     std::set<std::uint64_t> sector_ids;
 
@@ -1146,6 +1254,13 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
         if (entry.type == kChunkMaterials) {
             std::istringstream input(payload_string(payload));
             if (!read_materials_payload(input, message)) {
+                return load_error(message);
+            }
+            continue;
+        }
+        if (entry.type == kChunkLighting && (entry.flags & kChunkFlagOptional) != 0U) {
+            std::istringstream input(payload_string(payload));
+            if (!read_lighting_payload(input, world_lighting, message)) {
                 return load_error(message);
             }
             continue;
@@ -1197,7 +1312,8 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
         return load_error(message);
     }
 
-    LoadMapResult result = rebuild_loaded_sectors(std::move(sectors), player_spawn, std::move(point_lights));
+    LoadMapResult result =
+        rebuild_loaded_sectors(std::move(sectors), player_spawn, std::move(point_lights), world_lighting);
     if (result.ok) {
         result.message = "Loaded chunked map.";
     }
@@ -1224,8 +1340,18 @@ SaveMapResult save_map_file(
     const std::vector<PointLight>& point_lights,
     const std::filesystem::path& path
 ) {
+    return save_map_file(sectors, player_spawn, point_lights, WorldLighting{}, path);
+}
+
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const std::filesystem::path& path
+) {
     std::string error_message;
-    std::vector<ChunkRecord> chunks = build_chunk_records(sectors, player_spawn, point_lights);
+    std::vector<ChunkRecord> chunks = build_chunk_records(sectors, player_spawn, point_lights, world_lighting);
     if (!write_chunk_file(path, std::move(chunks), error_message)) {
         return save_error(error_message);
     }
@@ -1242,8 +1368,19 @@ SaveMapResult save_map_file_dirty(
     const MapDirtyState& dirty_state,
     const std::filesystem::path& path
 ) {
+    return save_map_file_dirty(sectors, player_spawn, point_lights, WorldLighting{}, dirty_state, path);
+}
+
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+) {
     if (dirty_state.topology) {
-        return save_map_file(sectors, player_spawn, point_lights, path);
+        return save_map_file(sectors, player_spawn, point_lights, world_lighting, path);
     }
 
     std::vector<SectorPlane> sectors_with_ids = sectors;
@@ -1260,7 +1397,7 @@ SaveMapResult save_map_file_dirty(
         parse_chunk_directory(existing_bytes, existing_directory, read_message);
 
     if (!can_reuse_existing) {
-        return save_map_file(sectors_with_ids, spawn_with_id, lights_with_ids, path);
+        return save_map_file(sectors_with_ids, spawn_with_id, lights_with_ids, world_lighting, path);
     }
 
     auto existing_chunk = [&existing_bytes, &existing_directory](const std::uint32_t type, const std::uint64_t id, ChunkRecord& out) {
@@ -1286,6 +1423,12 @@ SaveMapResult save_map_file_dirty(
         chunks.push_back(std::move(reused));
     } else {
         chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload())});
+    }
+
+    if (!dirty_state.metadata && existing_chunk(kChunkLighting, 0, reused)) {
+        chunks.push_back(std::move(reused));
+    } else {
+        chunks.push_back(ChunkRecord{kChunkLighting, kChunkFlagOptional, 0, string_payload(write_lighting_payload(world_lighting))});
     }
 
     if (!dirty_state.entities && existing_chunk(kChunkEntities, 0, reused)) {

@@ -88,7 +88,7 @@ std::uint64_t read_u64(const std::vector<unsigned char>& bytes, const std::size_
     return value;
 }
 
-std::string sector_chunk_payload(const std::filesystem::path& path, const std::uint64_t sector_id) {
+std::string chunk_payload(const std::filesystem::path& path, const std::string& chunk_type, const std::uint64_t chunk_id) {
     std::ifstream input(path, std::ios::binary);
     std::vector<unsigned char> bytes(std::istreambuf_iterator<char>(input), {});
     expect(bytes.size() >= 32, "chunked file should contain a header");
@@ -99,7 +99,7 @@ std::string sector_chunk_payload(const std::filesystem::path& path, const std::u
         const std::size_t entry = directory_offset + (static_cast<std::size_t>(i) * entry_size);
         const std::string type(reinterpret_cast<const char*>(&bytes[entry]), 4);
         const std::uint64_t id = read_u64(bytes, entry + 8);
-        if (type != "SECT" || id != sector_id) {
+        if (type != chunk_type || id != chunk_id) {
             continue;
         }
         const std::uint64_t offset = read_u64(bytes, entry + 16);
@@ -110,6 +110,10 @@ std::string sector_chunk_payload(const std::filesystem::path& path, const std::u
         );
     }
     return {};
+}
+
+std::string sector_chunk_payload(const std::filesystem::path& path, const std::uint64_t sector_id) {
+    return chunk_payload(path, "SECT", sector_id);
 }
 
 } // namespace
@@ -289,6 +293,59 @@ int main() {
     }
 
     {
+        const std::filesystem::path path = test_path("undecedent_map_io_world_lighting.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
+        undecedent::PlayerSpawn spawn;
+        undecedent::WorldLighting lighting;
+        lighting.sun_enabled = true;
+        lighting.sun_direction = undecedent::Vec3{0.0F, -2.0F, 0.0F};
+        lighting.sun_color = undecedent::Vec3{0.8F, 0.7F, 0.6F};
+        lighting.sun_intensity = 1.25F;
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({sector}, spawn, {}, lighting, path);
+        expect(saved.ok, "world lighting save should succeed");
+
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "world lighting load should succeed");
+        expect(loaded.world_lighting.sun_enabled, "sun enabled flag should round-trip");
+        expect(std::abs(loaded.world_lighting.sun_direction.x - 0.0F) <= 0.001F, "sun direction x should normalize");
+        expect(std::abs(loaded.world_lighting.sun_direction.y + 1.0F) <= 0.001F, "sun direction y should normalize");
+        expect(std::abs(loaded.world_lighting.sun_direction.z - 0.0F) <= 0.001F, "sun direction z should normalize");
+        expect(loaded.world_lighting.sun_color.x == 0.8F, "sun color should round-trip");
+        expect(loaded.world_lighting.sun_intensity == 1.25F, "sun intensity should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_dirty_lighting.udmap");
+        SectorPlane sector;
+        sector.id = 400;
+        sector.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
+        undecedent::PlayerSpawn spawn;
+        undecedent::PointLight light;
+        light.id = 401;
+        undecedent::WorldLighting lighting;
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({sector}, spawn, {light}, lighting, path);
+        expect(saved.ok, "dirty lighting setup save should succeed");
+        const std::string sector_before = sector_chunk_payload(path, 400);
+        const std::string entities_before = chunk_payload(path, "ENTY", 0);
+        const std::string lighting_before = chunk_payload(path, "LITE", 0);
+        lighting.sun_intensity = 2.0F;
+        undecedent::MapDirtyState dirty;
+        dirty.metadata = true;
+        const undecedent::SaveMapResult dirty_saved =
+            undecedent::save_map_file_dirty({sector}, spawn, {light}, lighting, dirty, path);
+        expect(dirty_saved.ok, "dirty lighting save should succeed");
+        expect(sector_chunk_payload(path, 400) == sector_before, "dirty lighting save should preserve sector chunk");
+        expect(chunk_payload(path, "ENTY", 0) == entities_before, "dirty lighting save should preserve entity chunk");
+        expect(chunk_payload(path, "LITE", 0) != lighting_before, "dirty lighting save should rewrite lighting chunk");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "dirty lighting map should load");
+        expect(loaded.world_lighting.sun_intensity == 2.0F, "dirty lighting intensity should load");
+        std::filesystem::remove(path);
+    }
+
+    {
         const std::filesystem::path path = test_path("undecedent_map_io_stacked.udmap");
         SectorPlane lower;
         lower.floor_height = 0.0F;
@@ -335,6 +392,8 @@ int main() {
         expect(loaded.ok, "legacy map without floor should load");
         expect(!loaded.player_spawn.set, "legacy map without player spawn should keep spawn unset");
         expect(loaded.point_lights.empty(), "legacy map without point lights should load an empty light list");
+        expect(loaded.world_lighting.sun_enabled, "legacy map should load default sun enabled");
+        expect(loaded.world_lighting.sun_intensity > 0.0F, "legacy map should load default sun intensity");
         expect(loaded.sectors.front().floor_height == 0.0F, "legacy map floor should default to zero");
         expect(loaded.sectors.front().floor_material == 0, "legacy map floor material should default to zero");
         expect(loaded.sectors.front().wall_materials.size() == 4, "legacy map wall materials should be generated");
