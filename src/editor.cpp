@@ -561,6 +561,7 @@ bool adjust_selected_entity_property(EditorWorld& editor_world, const EntityProp
             case EntityProperty::ColorB: light->color.z = std::max(0.0F, light->color.z + delta); break;
             case EntityProperty::Radius: light->radius = std::max(1.0F, light->radius + delta); break;
             case EntityProperty::Intensity: light->intensity = std::max(0.0F, light->intensity + delta); break;
+            case EntityProperty::ShadowBias: light->shadow_bias = std::max(0.0F, light->shadow_bias + delta); break;
             default: changed = false; break;
             }
             if (changed) {

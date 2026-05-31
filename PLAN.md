@@ -11,6 +11,15 @@ This document is the project north star. When implementation choices compete, pr
 - Build a distinct fiction and ruleset early enough that every feature feels native to Undecedent rather than like a placeholder clone.
 - Treat references as design prompts, not targets to reproduce.
 
+## IP Guardrails
+
+- Treat broad genre conventions as available design territory: survival waves, escalating pressure, resource scarcity, routes, locked spaces, enemy readability, spatial mastery, and arcade pacing.
+- Treat specific expression as off-limits: recognizable characters, factions, storylines, named systems, exact perk/economy structures, weapon identities, sound cues, UI trade dress, memorable room layouts, set pieces, iconography, and marketing language from other games.
+- Use the scenes a faire idea carefully. Common or necessary genre elements can inspire Undecedent, but the project must add original expression, combinations, presentation, fiction, tuning, and implementation.
+- When a feature feels too close to a reference, rename it, reshape its rules, change its presentation, and document the Undecedent-specific purpose before it ships.
+- Prefer internal reference language like "wave pressure," "route mastery," or "arcade survival economy" over brand-specific shorthand in code, assets, docs, and UI.
+- This document is a creative and engineering guardrail, not legal advice. If a planned feature depends on close imitation of another game's expression, get legal review or redesign it.
+
 ## Speed First
 
 - The game should feel immediate: high framerate, low input latency, fast startup, fast reloads, and short edit-to-play loops.
@@ -55,4 +64,3 @@ This document is the project north star. When implementation choices compete, pr
 - Preserve fast local builds and simple launch paths.
 - Treat bugs in input latency, frame pacing, editor data loss, and map corruption as high-priority issues.
 - When tradeoffs conflict, choose in this order: player responsiveness, editor iteration speed, gameplay clarity, maintainable implementation, visual flourish.
-

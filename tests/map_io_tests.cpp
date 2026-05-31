@@ -88,6 +88,32 @@ std::uint64_t read_u64(const std::vector<unsigned char>& bytes, const std::size_
     return value;
 }
 
+std::uint32_t checksum_bytes(const std::string& text) {
+    std::uint32_t crc = 0xFFFFFFFFU;
+    for (const unsigned char byte : text) {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit) {
+            const std::uint32_t mask = 0U - (crc & 1U);
+            crc = (crc >> 1U) ^ (0xEDB88320U & mask);
+        }
+    }
+    return ~crc;
+}
+
+void write_u32(std::vector<unsigned char>& bytes, const std::size_t offset, const std::uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) {
+        bytes[offset + static_cast<std::size_t>(shift / 8)] =
+            static_cast<unsigned char>((value >> shift) & 0xFFU);
+    }
+}
+
+void write_u64(std::vector<unsigned char>& bytes, const std::size_t offset, const std::uint64_t value) {
+    for (int shift = 0; shift < 64; shift += 8) {
+        bytes[offset + static_cast<std::size_t>(shift / 8)] =
+            static_cast<unsigned char>((value >> shift) & 0xFFU);
+    }
+}
+
 std::string chunk_payload(const std::filesystem::path& path, const std::string& chunk_type, const std::uint64_t chunk_id) {
     std::ifstream input(path, std::ios::binary);
     std::vector<unsigned char> bytes(std::istreambuf_iterator<char>(input), {});
@@ -110,6 +136,39 @@ std::string chunk_payload(const std::filesystem::path& path, const std::string& 
         );
     }
     return {};
+}
+
+void replace_last_chunk_payload(
+    const std::filesystem::path& path,
+    const std::string& chunk_type,
+    const std::uint64_t chunk_id,
+    const std::string& payload
+) {
+    std::ifstream input(path, std::ios::binary);
+    std::vector<unsigned char> bytes(std::istreambuf_iterator<char>(input), {});
+    expect(bytes.size() >= 32, "chunked file should contain a header before replacement");
+    const std::uint32_t chunk_count = read_u32(bytes, 12);
+    constexpr std::size_t directory_offset = 32;
+    constexpr std::size_t entry_size = 56;
+    for (std::uint32_t i = 0; i < chunk_count; ++i) {
+        const std::size_t entry = directory_offset + (static_cast<std::size_t>(i) * entry_size);
+        const std::string type(reinterpret_cast<const char*>(&bytes[entry]), 4);
+        const std::uint64_t id = read_u64(bytes, entry + 8);
+        if (type != chunk_type || id != chunk_id) {
+            continue;
+        }
+        const std::uint64_t offset = read_u64(bytes, entry + 16);
+        const std::uint64_t size = read_u64(bytes, entry + 24);
+        expect(offset + size == bytes.size(), "replacement helper expects the target chunk to be last");
+        bytes.resize(static_cast<std::size_t>(offset));
+        bytes.insert(bytes.end(), payload.begin(), payload.end());
+        write_u64(bytes, entry + 24, static_cast<std::uint64_t>(payload.size()));
+        write_u32(bytes, entry + 32, checksum_bytes(payload));
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return;
+    }
+    expect(false, "replacement helper could not find requested chunk");
 }
 
 std::string sector_chunk_payload(const std::filesystem::path& path, const std::uint64_t sector_id) {
@@ -277,8 +336,11 @@ int main() {
         light.color = undecedent::Vec3{0.75F, 0.5F, 0.25F};
         light.radius = 256.0F;
         light.intensity = 2.25F;
+        light.shadow_bias = 3.5F;
         const undecedent::SaveMapResult saved = undecedent::save_map_file({sector}, spawn, {light}, path);
         expect(saved.ok, "point light save should succeed");
+        expect(chunk_payload(path, "ENTY", 0).find("entities 2") != std::string::npos, "point light save should write entity v2");
+        expect(chunk_payload(path, "ENTY", 0).find("3.5") != std::string::npos, "point light save should write shadow bias");
 
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "point light load should succeed");
@@ -289,6 +351,27 @@ int main() {
         expect(loaded.point_lights.front().color.x == 0.75F, "point light color should round-trip");
         expect(loaded.point_lights.front().radius == 256.0F, "point light radius should round-trip");
         expect(loaded.point_lights.front().intensity == 2.25F, "point light intensity should round-trip");
+        expect(loaded.point_lights.front().shadow_bias == 3.5F, "point light shadow bias should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_point_light_v1_entities.udmap");
+        undecedent::PointLight light;
+        light.id = 33;
+        light.position = undecedent::Vec3{1.0F, 2.0F, 3.0F};
+        light.radius = 128.0F;
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({}, undecedent::PlayerSpawn{}, {light}, path);
+        expect(saved.ok, "v1 entity compatibility setup save should succeed");
+        replace_last_chunk_payload(path, "ENTY", 0,
+            "entities 1\n"
+            "player_spawn unset\n"
+            "point_lights 1\n"
+            "point_light 33 1 2 3 1 0.859999955 0.620000005 128 1.5\n");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "v1 entity chunk should load");
+        expect(loaded.point_lights.size() == 1, "v1 entity light should load");
+        expect(loaded.point_lights.front().shadow_bias == 2.0F, "v1 entity light should default shadow bias");
         std::filesystem::remove(path);
     }
 
@@ -491,6 +574,22 @@ int main() {
     }
 
     {
+        const std::filesystem::path path = test_path("undecedent_map_io_bad_light_shadow_bias.udmap");
+        undecedent::PointLight light;
+        light.id = 77;
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({}, undecedent::PlayerSpawn{}, {light}, path);
+        expect(saved.ok, "bad shadow bias setup save should succeed");
+        replace_last_chunk_payload(path, "ENTY", 0,
+            "entities 2\n"
+            "player_spawn unset\n"
+            "point_lights 1\n"
+            "point_light 77 0 64 0 1 0.859999955 0.620000005 384 1.5 -0.25\n");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(!loaded.ok, "negative point light shadow bias should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
         const std::filesystem::path path = test_path("undecedent_map_io_bad_light_float.udmap");
         write_text(path,
             "UNDECEDENT_MAP 1\n"
@@ -500,6 +599,22 @@ int main() {
             "sectors 0\n");
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(!loaded.ok, "malformed point light float should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_bad_light_shadow_bias_float.udmap");
+        undecedent::PointLight light;
+        light.id = 78;
+        const undecedent::SaveMapResult saved = undecedent::save_map_file({}, undecedent::PlayerSpawn{}, {light}, path);
+        expect(saved.ok, "bad shadow bias float setup save should succeed");
+        replace_last_chunk_payload(path, "ENTY", 0,
+            "entities 2\n"
+            "player_spawn unset\n"
+            "point_lights 1\n"
+            "point_light 78 0 64 0 1 0.859999955 0.620000005 384 1.5 nope\n");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(!loaded.ok, "malformed point light shadow bias should be rejected");
         std::filesystem::remove(path);
     }
 

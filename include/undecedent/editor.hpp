@@ -60,6 +60,7 @@ enum class EntityProperty {
     ColorB,
     Radius,
     Intensity,
+    ShadowBias,
     SunDirectionX,
     SunDirectionY,
     SunDirectionZ,

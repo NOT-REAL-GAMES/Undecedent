@@ -161,7 +161,12 @@ struct ProfilerDisplay {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double gbuffer_ms = 0.0;
+    double shadow_pack_upload_ms = 0.0;
     double shadow_ms = 0.0;
+    double screen_shadow_ms = 0.0;
+    double lighting_ms = 0.0;
+    double wire_overlay_ms = 0.0;
     double overlay_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
@@ -177,7 +182,12 @@ struct ProfilerAccumulator {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double gbuffer_ms = 0.0;
+    double shadow_pack_upload_ms = 0.0;
     double shadow_ms = 0.0;
+    double screen_shadow_ms = 0.0;
+    double lighting_ms = 0.0;
+    double wire_overlay_ms = 0.0;
     double overlay_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
@@ -196,7 +206,12 @@ struct BenchmarkAccumulator {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double gbuffer_ms = 0.0;
+    double shadow_pack_upload_ms = 0.0;
     double shadow_ms = 0.0;
+    double screen_shadow_ms = 0.0;
+    double lighting_ms = 0.0;
+    double wire_overlay_ms = 0.0;
     double overlay_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
@@ -317,7 +332,12 @@ void print_benchmark_report(
         << " events=" << format_ms(accumulator.events_ms * inv_frames) << "ms"
         << " update=" << format_ms(accumulator.update_ms * inv_frames) << "ms"
         << " render=" << format_ms(accumulator.render_ms * inv_frames) << "ms"
+        << " gbuf=" << format_ms(accumulator.gbuffer_ms * inv_frames) << "ms"
+        << " light=" << format_ms(accumulator.lighting_ms * inv_frames) << "ms"
+        << " shpack=" << format_ms(accumulator.shadow_pack_upload_ms * inv_frames) << "ms"
         << " shadow=" << format_ms(accumulator.shadow_ms * inv_frames) << "ms"
+        << " ssshad=" << format_ms(accumulator.screen_shadow_ms * inv_frames) << "ms"
+        << " wire=" << format_ms(accumulator.wire_overlay_ms * inv_frames) << "ms"
         << " overlay=" << format_ms(accumulator.overlay_ms * inv_frames) << "ms"
         << " finish=" << format_ms(accumulator.finish_ms * inv_frames) << "ms"
         << " swap=" << format_ms(accumulator.swap_ms * inv_frames) << "ms"
@@ -512,7 +532,12 @@ void draw_profiler_overlay(
         "EVENTS " + format_ms(profiler.events_ms) + "MS",
         "UPDATE " + format_ms(profiler.update_ms) + "MS",
         "RENDER " + format_ms(profiler.render_ms) + "MS",
+        "GBUF " + format_ms(profiler.gbuffer_ms) + "MS",
+        "LIGHT " + format_ms(profiler.lighting_ms) + "MS",
+        "SHPACK " + format_ms(profiler.shadow_pack_upload_ms) + "MS",
         "SHADOW " + format_ms(profiler.shadow_ms) + "MS",
+        "SSSHAD " + format_ms(profiler.screen_shadow_ms) + "MS",
+        "WIRE " + format_ms(profiler.wire_overlay_ms) + "MS",
         "OVERLAY " + format_ms(profiler.overlay_ms) + "MS",
         "FINISH " + format_ms(profiler.finish_ms) + "MS",
         "SWAP " + format_ms(profiler.swap_ms) + "MS",
@@ -686,6 +711,7 @@ int main() {
     bool profiler_enabled = false;
     bool profiler_finish_diagnostic_enabled = false;
     bool runtime_wire_overlay_enabled = false;
+    bool runtime_screen_space_shadows_enabled = true;
     BenchmarkState benchmark{};
     float fps_counter_seconds = 0.0F;
     int fps_counter_frames = 0;
@@ -707,13 +733,14 @@ int main() {
         kScaleIndicatorMaxPixels,
         kPlayerEyeHeight,
     };
-    const GameRenderConfig game_render_config{
+    GameRenderConfig game_render_config{
         kGameNearPlane,
         kGameFarPlane,
         70.0F,
         kPlayerEyeHeight,
         kPlayerHeight,
         kPlayerRadius,
+        runtime_screen_space_shadows_enabled,
     };
     undecedent::DeferredRenderer deferred_renderer{};
     int active_material = undecedent::kDefaultMaterialId;
@@ -738,7 +765,12 @@ int main() {
         double events_ms = 0.0;
         double update_ms = 0.0;
         double render_ms = 0.0;
+        double gbuffer_ms = 0.0;
+        double shadow_pack_upload_ms = 0.0;
         double shadow_ms = 0.0;
+        double screen_shadow_ms = 0.0;
+        double lighting_ms = 0.0;
+        double wire_overlay_ms = 0.0;
         double overlay_ms = 0.0;
         double finish_ms = 0.0;
         double swap_ms = 0.0;
@@ -917,6 +949,13 @@ int main() {
                 if (key == SDLK_F4 && !event.key.repeat) {
                     profiler_enabled = !profiler_enabled;
                     std::cout << "Profiler " << (profiler_enabled ? "enabled" : "disabled") << '\n';
+                }
+
+                if ((key == SDLK_F5 || scancode == SDL_SCANCODE_F5) && !event.key.repeat) {
+                    runtime_screen_space_shadows_enabled = !runtime_screen_space_shadows_enabled;
+                    game_render_config.screen_space_shadows_enabled = runtime_screen_space_shadows_enabled;
+                    std::cout << "Screen-space shadows "
+                              << (runtime_screen_space_shadows_enabled ? "enabled" : "disabled") << '\n';
                 }
 
                 if ((key == SDLK_F7 || scancode == SDL_SCANCODE_F7) && !event.key.repeat) {
@@ -1430,7 +1469,8 @@ int main() {
         } else {
             glClearColor(0.02F, 0.025F, 0.03F, 1.0F);
         }
-        if (!benchmark.enabled || !benchmark.skip_clear) {
+        const bool deferred_playtest_now = app_mode == AppMode::Playtest;
+        if (!deferred_playtest_now && (!benchmark.enabled || !benchmark.skip_clear)) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
 
@@ -1454,7 +1494,12 @@ int main() {
                     runtime_wire_overlay_enabled,
                     game_render_config
                 );
+                gbuffer_ms = deferred_renderer.last_gbuffer_ms;
+                shadow_pack_upload_ms = deferred_renderer.last_shadow_pack_upload_ms;
                 shadow_ms = deferred_renderer.last_shadow_ms;
+                screen_shadow_ms = deferred_renderer.last_screen_shadow_ms;
+                lighting_ms = deferred_renderer.last_lighting_ms;
+                wire_overlay_ms = deferred_renderer.last_wire_overlay_ms;
             } else {
                 visible_triangle_count = draw_runtime_world(
                     editor_world.runtime_world,
@@ -1538,7 +1583,12 @@ int main() {
         profiler_accumulator.events_ms += events_ms;
         profiler_accumulator.update_ms += update_ms;
         profiler_accumulator.render_ms += render_ms;
+        profiler_accumulator.gbuffer_ms += gbuffer_ms;
+        profiler_accumulator.shadow_pack_upload_ms += shadow_pack_upload_ms;
         profiler_accumulator.shadow_ms += shadow_ms;
+        profiler_accumulator.screen_shadow_ms += screen_shadow_ms;
+        profiler_accumulator.lighting_ms += lighting_ms;
+        profiler_accumulator.wire_overlay_ms += wire_overlay_ms;
         profiler_accumulator.overlay_ms += overlay_ms;
         profiler_accumulator.finish_ms += finish_ms;
         profiler_accumulator.swap_ms += swap_ms;
@@ -1550,7 +1600,12 @@ int main() {
             benchmark_accumulator.events_ms += events_ms;
             benchmark_accumulator.update_ms += update_ms;
             benchmark_accumulator.render_ms += render_ms;
+            benchmark_accumulator.gbuffer_ms += gbuffer_ms;
+            benchmark_accumulator.shadow_pack_upload_ms += shadow_pack_upload_ms;
             benchmark_accumulator.shadow_ms += shadow_ms;
+            benchmark_accumulator.screen_shadow_ms += screen_shadow_ms;
+            benchmark_accumulator.lighting_ms += lighting_ms;
+            benchmark_accumulator.wire_overlay_ms += wire_overlay_ms;
             benchmark_accumulator.overlay_ms += overlay_ms;
             benchmark_accumulator.finish_ms += finish_ms;
             benchmark_accumulator.swap_ms += swap_ms;
@@ -1576,7 +1631,12 @@ int main() {
             displayed_profiler.events_ms = profiler_accumulator.events_ms * inv_frames;
             displayed_profiler.update_ms = profiler_accumulator.update_ms * inv_frames;
             displayed_profiler.render_ms = profiler_accumulator.render_ms * inv_frames;
+            displayed_profiler.gbuffer_ms = profiler_accumulator.gbuffer_ms * inv_frames;
+            displayed_profiler.shadow_pack_upload_ms = profiler_accumulator.shadow_pack_upload_ms * inv_frames;
             displayed_profiler.shadow_ms = profiler_accumulator.shadow_ms * inv_frames;
+            displayed_profiler.screen_shadow_ms = profiler_accumulator.screen_shadow_ms * inv_frames;
+            displayed_profiler.lighting_ms = profiler_accumulator.lighting_ms * inv_frames;
+            displayed_profiler.wire_overlay_ms = profiler_accumulator.wire_overlay_ms * inv_frames;
             displayed_profiler.overlay_ms = profiler_accumulator.overlay_ms * inv_frames;
             displayed_profiler.finish_ms = profiler_accumulator.finish_ms * inv_frames;
             displayed_profiler.swap_ms = profiler_accumulator.swap_ms * inv_frames;

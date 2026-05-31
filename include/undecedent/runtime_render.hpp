@@ -17,6 +17,7 @@ struct GameRenderConfig {
     float player_eye_height = 48.0F;
     float player_height = 56.0F;
     float player_radius = 8.0F;
+    bool screen_space_shadows_enabled = true;
 };
 
 void set_game_projection(int width, int height, const GameCamera& camera, const GameRenderConfig& config);

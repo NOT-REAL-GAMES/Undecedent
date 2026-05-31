@@ -21,17 +21,6 @@ struct Mat4 {
     std::array<float, 16> m{};
 };
 
-struct GpuPointLight {
-    std::array<float, 4> position_radius{};
-    std::array<float, 4> color_intensity{};
-    std::array<float, 4> shadow_flags{};
-};
-
-struct GpuPointShadowFace {
-    std::array<float, 4> rect{};
-    std::array<float, 16> matrix{};
-};
-
 float dot3(const Vec3 a, const Vec3 b) {
     return (a.x * b.x) + (a.y * b.y) + (a.z * b.z);
 }
@@ -128,6 +117,73 @@ Mat4 look_at_matrix(const Vec3 eye, const Vec3 target, const Vec3 up_hint) {
     out.m[14] = dot3(f, eye);
     out.m[15] = 1.0F;
     return out;
+}
+
+Mat4 translation_matrix(const Vec3 offset) {
+    Mat4 out{};
+    out.m[0] = 1.0F;
+    out.m[5] = 1.0F;
+    out.m[10] = 1.0F;
+    out.m[12] = offset.x;
+    out.m[13] = offset.y;
+    out.m[14] = offset.z;
+    out.m[15] = 1.0F;
+    return out;
+}
+
+Mat4 rotation_x_matrix(const float angle) {
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    Mat4 out{};
+    out.m[0] = 1.0F;
+    out.m[5] = c;
+    out.m[6] = s;
+    out.m[9] = -s;
+    out.m[10] = c;
+    out.m[15] = 1.0F;
+    return out;
+}
+
+Mat4 rotation_y_matrix(const float angle) {
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    Mat4 out{};
+    out.m[0] = c;
+    out.m[2] = -s;
+    out.m[5] = 1.0F;
+    out.m[8] = s;
+    out.m[10] = c;
+    out.m[15] = 1.0F;
+    return out;
+}
+
+Vec3 camera_forward(const GameCamera& camera) {
+    const float forward_flat = std::cos(camera.pitch);
+    return normalize3(
+        Vec3{
+            -std::sin(camera.yaw) * forward_flat,
+            std::sin(camera.pitch),
+            -std::cos(camera.yaw) * forward_flat,
+        },
+        Vec3{0.0F, 0.0F, -1.0F}
+    );
+}
+
+Mat4 game_view_projection_matrix(
+    const int width,
+    const int height,
+    const GameCamera& camera,
+    const GameRenderConfig& config
+) {
+    const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0F;
+    const float fov_y_radians = config.fov_y_degrees * 3.14159265F / 180.0F;
+    const Mat4 projection = perspective_matrix(fov_y_radians, aspect, config.near_plane, config.far_plane);
+    const Mat4 view =
+        multiply(
+            multiply(rotation_x_matrix(-camera.pitch), rotation_y_matrix(-camera.yaw)),
+            translation_matrix(Vec3{-camera.x, -camera.y, -camera.z})
+        );
+    return multiply(projection, view);
 }
 
 std::array<Mat4, 6> point_shadow_matrices(const PointLight& light) {
@@ -269,6 +325,8 @@ bool render_vsm_shadow_maps(
     const GameCamera& camera
 ) {
     renderer.last_shadow_ms = 0.0;
+    const bool render_point_shadows = atlas.shadowed_lights > 0;
+    const bool render_sun_shadow = world_lighting.sun_enabled && world_lighting.sun_intensity > 0.0F;
     if (renderer.shadows_disabled ||
         renderer.shadow_framebuffer == 0 ||
         renderer.point_shadow_texture == 0 ||
@@ -276,7 +334,8 @@ bool render_vsm_shadow_maps(
         renderer.point_shadow_program == 0 ||
         renderer.sun_shadow_program == 0 ||
         render_cache.vertex_buffer == 0 ||
-        render_cache.total_vertices <= 0) {
+        render_cache.total_vertices <= 0 ||
+        (!render_point_shadows && !render_sun_shadow)) {
         return false;
     }
 
@@ -297,54 +356,56 @@ bool render_vsm_shadow_maps(
     glDisable(GL_BLEND);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-    glViewport(0, 0, kPointShadowAtlasSize, kPointShadowAtlasSize);
-    glBindRenderbuffer(GL_RENDERBUFFER, renderer.point_shadow_depth_renderbuffer);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kPointShadowAtlasSize, kPointShadowAtlasSize);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, renderer.point_shadow_depth_renderbuffer);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, renderer.point_shadow_texture, 0);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        renderer.shadows_disabled = true;
-        glDisableVertexAttribArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glUseProgram(0);
-        glBindRenderbuffer(GL_RENDERBUFFER, 0);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        return false;
-    }
-    glClearColor(1.0F, 1.0F, 0.0F, 0.0F);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glUseProgram(renderer.point_shadow_program);
-    glEnable(GL_SCISSOR_TEST);
-    for (const PointShadowAtlasEntry& entry : atlas.entries) {
-        if (!entry.shadowed || entry.light_index < 0 || entry.light_index >= static_cast<int>(lights.size())) {
-            continue;
+    if (render_point_shadows) {
+        glViewport(0, 0, kPointShadowAtlasSize, kPointShadowAtlasSize);
+        glBindRenderbuffer(GL_RENDERBUFFER, renderer.point_shadow_depth_renderbuffer);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kPointShadowAtlasSize, kPointShadowAtlasSize);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, renderer.point_shadow_depth_renderbuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, renderer.point_shadow_texture, 0);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            renderer.shadows_disabled = true;
+            glDisableVertexAttribArray(0);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glUseProgram(0);
+            glBindRenderbuffer(GL_RENDERBUFFER, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return false;
         }
-        const PointLight& light = lights[static_cast<std::size_t>(entry.light_index)];
-        const std::array<Mat4, 6> matrices = point_shadow_matrices(light);
-        glUniform3f(
-            glGetUniformLocation(renderer.point_shadow_program, "uLightPosition"),
-            light.position.x,
-            light.position.y,
-            light.position.z
-        );
-        glUniform1f(glGetUniformLocation(renderer.point_shadow_program, "uLightRadius"), std::max(light.radius, 1.0F));
-        for (int face = 0; face < 6; ++face) {
-            const ShadowAtlasRect rect = entry.faces[static_cast<std::size_t>(face)];
-            glViewport(rect.x, rect.y, rect.size, rect.size);
-            glScissor(rect.x, rect.y, rect.size, rect.size);
-            glUniformMatrix4fv(
-                glGetUniformLocation(renderer.point_shadow_program, "uLightMatrix"),
-                1,
-                GL_FALSE,
-                matrices[static_cast<std::size_t>(face)].m.data()
+        glClearColor(1.0F, 1.0F, 0.0F, 0.0F);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(renderer.point_shadow_program);
+        glEnable(GL_SCISSOR_TEST);
+        for (const PointShadowAtlasEntry& entry : atlas.entries) {
+            if (!entry.shadowed || entry.light_index < 0 || entry.light_index >= static_cast<int>(lights.size())) {
+                continue;
+            }
+            const PointLight& light = lights[static_cast<std::size_t>(entry.light_index)];
+            const std::array<Mat4, 6> matrices = point_shadow_matrices(light);
+            glUniform3f(
+                renderer.point_shadow_uniforms.light_position,
+                light.position.x,
+                light.position.y,
+                light.position.z
             );
-            glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
+            glUniform1f(renderer.point_shadow_uniforms.light_radius, std::max(light.radius, 1.0F));
+            for (int face = 0; face < 6; ++face) {
+                const ShadowAtlasRect rect = entry.faces[static_cast<std::size_t>(face)];
+                glViewport(rect.x, rect.y, rect.size, rect.size);
+                glScissor(rect.x, rect.y, rect.size, rect.size);
+                glUniformMatrix4fv(
+                    renderer.point_shadow_uniforms.light_matrix,
+                    1,
+                    GL_FALSE,
+                    matrices[static_cast<std::size_t>(face)].m.data()
+                );
+                glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
+            }
         }
+        glDisable(GL_SCISSOR_TEST);
     }
-    glDisable(GL_SCISSOR_TEST);
 
-    if (world_lighting.sun_enabled && world_lighting.sun_intensity > 0.0F) {
+    if (render_sun_shadow) {
         const Mat4 matrix = sun_shadow_matrix(world_lighting, camera);
         glViewport(0, 0, kSunShadowResolution, kSunShadowResolution);
         glBindRenderbuffer(GL_RENDERBUFFER, renderer.sun_shadow_depth_renderbuffer);
@@ -364,7 +425,7 @@ bool render_vsm_shadow_maps(
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(renderer.sun_shadow_program);
         glUniformMatrix4fv(
-            glGetUniformLocation(renderer.sun_shadow_program, "uLightMatrix"),
+            renderer.sun_shadow_uniforms.light_matrix,
             1,
             GL_FALSE,
             matrix.m.data()
@@ -381,6 +442,88 @@ bool render_vsm_shadow_maps(
     const auto shadow_end = std::chrono::steady_clock::now();
     renderer.last_shadow_ms =
         std::chrono::duration<double, std::milli>(shadow_end - shadow_start).count();
+    return true;
+}
+
+bool render_screen_space_sun_shadow(
+    DeferredRenderer& renderer,
+    const int width,
+    const int height,
+    const WorldLighting& world_lighting,
+    const GameCamera& camera,
+    const GameRenderConfig& config,
+    const Mat4& view_projection
+) {
+    renderer.last_screen_shadow_ms = 0.0;
+    if (!config.screen_space_shadows_enabled ||
+        !world_lighting.sun_enabled ||
+        world_lighting.sun_intensity <= 0.0F ||
+        renderer.screen_shadows_disabled ||
+        renderer.screen_shadow_framebuffer == 0 ||
+        renderer.screen_shadow_texture == 0 ||
+        renderer.screen_shadow_program == 0) {
+        return false;
+    }
+
+    const auto screen_shadow_start = std::chrono::steady_clock::now();
+    glBindFramebuffer(GL_FRAMEBUFFER, renderer.screen_shadow_framebuffer);
+    glViewport(0, 0, width, height);
+    const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &draw_buffer);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glClearColor(1.0F, 1.0F, 1.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(renderer.screen_shadow_program);
+    const DeferredScreenShadowUniforms& uniforms = renderer.screen_shadow_uniforms;
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, renderer.position_texture);
+    glUniform1i(uniforms.position, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, renderer.normal_texture);
+    glUniform1i(uniforms.normal, 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, renderer.albedo_texture);
+    glUniform1i(uniforms.albedo, 2);
+    glUniform2f(
+        uniforms.inv_viewport,
+        1.0F / static_cast<float>(width),
+        1.0F / static_cast<float>(height)
+    );
+    glUniform3f(uniforms.camera_position, camera.x, camera.y, camera.z);
+    const Vec3 forward = camera_forward(camera);
+    glUniform3f(uniforms.camera_forward, forward.x, forward.y, forward.z);
+    glUniform3f(
+        uniforms.sun_direction,
+        world_lighting.sun_direction.x,
+        world_lighting.sun_direction.y,
+        world_lighting.sun_direction.z
+    );
+    glUniformMatrix4fv(
+        uniforms.view_projection_matrix,
+        1,
+        GL_FALSE,
+        view_projection.m.data()
+    );
+
+    glBegin(GL_QUADS);
+    glVertex2f(-1.0F, -1.0F);
+    glVertex2f(1.0F, -1.0F);
+    glVertex2f(1.0F, 1.0F);
+    glVertex2f(-1.0F, 1.0F);
+    glEnd();
+
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    renderer.last_screen_shadow_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - screen_shadow_start).count();
     return true;
 }
 
@@ -491,25 +634,35 @@ int draw_deferred_runtime_world(
     const bool draw_wire_overlay,
     const GameRenderConfig& config
 ) {
+    renderer.last_gbuffer_ms = 0.0;
+    renderer.last_shadow_pack_upload_ms = 0.0;
+    renderer.last_shadow_ms = 0.0;
+    renderer.last_screen_shadow_ms = 0.0;
+    renderer.last_lighting_ms = 0.0;
+    renderer.last_wire_overlay_ms = 0.0;
     if (!ensure_deferred_renderer(renderer, width, height) ||
         render_cache.vertex_buffer == 0 || render_cache.total_vertices <= 0) {
-        renderer.last_shadow_ms = 0.0;
         return draw_runtime_world(world, render_cache, width, height, camera, draw_wire_overlay, true, config);
     }
 
-    std::vector<PointLight> lights;
+    auto elapsed_ms = [](const std::chrono::steady_clock::time_point start) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    };
+
+    const auto pack_start = std::chrono::steady_clock::now();
+    renderer.scratch_lights.clear();
     const Vec3 camera_position{camera.x, camera.y, camera.z};
     const int light_count = static_cast<int>(std::min<std::size_t>(point_lights.size(), kMaxDeferredPointLights));
-    lights.reserve(static_cast<std::size_t>(std::max(light_count, 1)));
+    renderer.scratch_lights.reserve(static_cast<std::size_t>(std::max(light_count, 1)));
     if (point_lights.size() <= static_cast<std::size_t>(kMaxDeferredPointLights)) {
-        lights.insert(lights.end(), point_lights.begin(), point_lights.end());
+        renderer.scratch_lights.insert(renderer.scratch_lights.end(), point_lights.begin(), point_lights.end());
     } else {
-        std::vector<int> ranked_indices;
-        ranked_indices.reserve(point_lights.size());
+        renderer.ranked_light_indices.clear();
+        renderer.ranked_light_indices.reserve(point_lights.size());
         for (int i = 0; i < static_cast<int>(point_lights.size()); ++i) {
-            ranked_indices.push_back(i);
+            renderer.ranked_light_indices.push_back(i);
         }
-        std::sort(ranked_indices.begin(), ranked_indices.end(), [&point_lights, camera_position](const int a, const int b) {
+        std::sort(renderer.ranked_light_indices.begin(), renderer.ranked_light_indices.end(), [&point_lights, camera_position](const int a, const int b) {
             const float score_a = point_light_priority(point_lights[static_cast<std::size_t>(a)], camera_position);
             const float score_b = point_light_priority(point_lights[static_cast<std::size_t>(b)], camera_position);
             if (score_a != score_b) {
@@ -518,27 +671,32 @@ int draw_deferred_runtime_world(
             return a < b;
         });
         for (int i = 0; i < kMaxDeferredPointLights; ++i) {
-            lights.push_back(point_lights[static_cast<std::size_t>(ranked_indices[static_cast<std::size_t>(i)])]);
+            renderer.scratch_lights.push_back(
+                point_lights[static_cast<std::size_t>(renderer.ranked_light_indices[static_cast<std::size_t>(i)])]
+            );
         }
     }
-    if (point_lights.empty()) {
+    const bool using_fallback_light = point_lights.empty();
+    if (using_fallback_light) {
         PointLight fallback_light;
         fallback_light.position = Vec3{camera.x, camera.y + 48.0F, camera.z};
         fallback_light.color = Vec3{1.0F, 0.93F, 0.80F};
         fallback_light.radius = 640.0F;
         fallback_light.intensity = 1.8F;
-        lights.push_back(fallback_light);
+        renderer.scratch_lights.push_back(fallback_light);
     }
+    const std::vector<PointLight>& lights = renderer.scratch_lights;
     const int submitted_light_count = static_cast<int>(lights.size());
     const PackedPointShadowAtlas shadow_atlas =
         pack_point_shadow_atlas(
             lights,
             camera_position,
             kMaxDeferredPointLights,
-            kMaxPointShadowedLights,
+            using_fallback_light ? 0 : kMaxPointShadowedLights,
             kPointShadowAtlasSize
         );
-    if (shadow_atlas.shadowed_lights < shadow_atlas.submitted_lights &&
+    if (!using_fallback_light &&
+        shadow_atlas.shadowed_lights < shadow_atlas.submitted_lights &&
         (renderer.last_shadow_submitted_lights != shadow_atlas.submitted_lights ||
             renderer.last_shadow_packed_lights != shadow_atlas.shadowed_lights)) {
         std::cout << "Shadow atlas packed " << shadow_atlas.shadowed_lights
@@ -549,6 +707,8 @@ int draw_deferred_runtime_world(
     const bool shadows_ready =
         render_vsm_shadow_maps(renderer, render_cache, lights, shadow_atlas, world_lighting, camera);
     const Mat4 sun_matrix = sun_shadow_matrix(world_lighting, camera);
+    const Mat4 view_projection = game_view_projection_matrix(width, height, camera, config);
+    renderer.last_shadow_pack_upload_ms = elapsed_ms(pack_start) - renderer.last_shadow_ms;
 
     const int camera_sector = sector_at_point(world, Vec3{camera.x, camera.y, camera.z});
     const bool filter_visible_sectors = camera_sector >= 0;
@@ -561,6 +721,7 @@ int draw_deferred_runtime_world(
 
     int visible_triangle_count = 0;
 
+    const auto gbuffer_start = std::chrono::steady_clock::now();
     glBindFramebuffer(GL_FRAMEBUFFER, renderer.framebuffer);
     glViewport(0, 0, width, height);
     const GLenum draw_buffers[] = {
@@ -639,7 +800,19 @@ int draw_deferred_runtime_world(
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    renderer.last_gbuffer_ms = elapsed_ms(gbuffer_start);
 
+    const bool screen_shadows_ready = render_screen_space_sun_shadow(
+        renderer,
+        width,
+        height,
+        world_lighting,
+        camera,
+        config,
+        view_projection
+    );
+
+    const auto lighting_start = std::chrono::steady_clock::now();
     glViewport(0, 0, width, height);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
@@ -648,76 +821,83 @@ int draw_deferred_runtime_world(
     glUseProgram(renderer.lighting_program);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, renderer.position_texture);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uPosition"), 0);
+    const DeferredLightingUniforms& uniforms = renderer.lighting_uniforms;
+    glUniform1i(uniforms.position, 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, renderer.normal_texture);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uNormal"), 1);
+    glUniform1i(uniforms.normal, 1);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, renderer.albedo_texture);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uAlbedo"), 2);
+    glUniform1i(uniforms.albedo, 2);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, renderer.material_texture);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uMaterial"), 3);
+    glUniform1i(uniforms.material, 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, screen_shadows_ready ? renderer.screen_shadow_texture : 0);
+    glUniform1i(uniforms.screen_shadow_mask, 4);
     glUniform2f(
-        glGetUniformLocation(renderer.lighting_program, "uInvViewport"),
+        uniforms.inv_viewport,
         1.0F / static_cast<float>(width),
         1.0F / static_cast<float>(height)
     );
-    glUniform3f(glGetUniformLocation(renderer.lighting_program, "uCameraPosition"), camera.x, camera.y, camera.z);
-    glUniform3f(glGetUniformLocation(renderer.lighting_program, "uAmbientColor"), 0.14F, 0.17F, 0.18F);
-    glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, shadows_ready ? renderer.point_shadow_texture : 0);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uPointShadowAtlas"), 4);
+    glUniform3f(uniforms.camera_position, camera.x, camera.y, camera.z);
+    glUniform3f(uniforms.ambient_color, 0.14F, 0.17F, 0.18F);
     glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, shadows_ready ? renderer.point_shadow_texture : 0);
+    glUniform1i(uniforms.point_shadow_atlas, 5);
+    glActiveTexture(GL_TEXTURE6);
     glBindTexture(GL_TEXTURE_2D, shadows_ready ? renderer.sun_shadow_texture : 0);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uSunShadowMoments"), 5);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uPointShadowsEnabled"), shadows_ready ? 1 : 0);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uSunEnabled"), world_lighting.sun_enabled ? 1 : 0);
-    glUniform1i(glGetUniformLocation(renderer.lighting_program, "uSunShadowEnabled"), shadows_ready ? 1 : 0);
+    glUniform1i(uniforms.sun_shadow_moments, 6);
+    glUniform1i(uniforms.point_shadows_enabled, shadows_ready && shadow_atlas.shadowed_lights > 0 ? 1 : 0);
+    glUniform1i(uniforms.sun_enabled, world_lighting.sun_enabled ? 1 : 0);
+    glUniform1i(uniforms.sun_shadow_enabled, shadows_ready && world_lighting.sun_enabled && world_lighting.sun_intensity > 0.0F ? 1 : 0);
     glUniform3f(
-        glGetUniformLocation(renderer.lighting_program, "uSunDirection"),
+        uniforms.sun_direction,
         world_lighting.sun_direction.x,
         world_lighting.sun_direction.y,
         world_lighting.sun_direction.z
     );
     glUniform3f(
-        glGetUniformLocation(renderer.lighting_program, "uSunColor"),
+        uniforms.sun_color,
         world_lighting.sun_color.x,
         world_lighting.sun_color.y,
         world_lighting.sun_color.z
     );
-    glUniform1f(glGetUniformLocation(renderer.lighting_program, "uSunIntensity"), world_lighting.sun_intensity);
+    glUniform1f(uniforms.sun_intensity, world_lighting.sun_intensity);
     glUniformMatrix4fv(
-        glGetUniformLocation(renderer.lighting_program, "uSunShadowMatrix"),
+        uniforms.sun_shadow_matrix,
         1,
         GL_FALSE,
         sun_matrix.m.data()
     );
-    const GLint light_count_location = glGetUniformLocation(renderer.lighting_program, "uLightCount");
-    glUniform1i(light_count_location, submitted_light_count);
-    std::vector<GpuPointLight> point_light_records(static_cast<std::size_t>(kMaxDeferredPointLights));
-    std::vector<GpuPointShadowFace> point_shadow_faces(
-        static_cast<std::size_t>(kMaxDeferredPointLights * kPointShadowFaceCount)
-    );
+    glUniform1i(uniforms.screen_space_shadows_enabled, screen_shadows_ready ? 1 : 0);
+    glUniform1i(uniforms.light_count, submitted_light_count);
+    const auto upload_start = std::chrono::steady_clock::now();
+    renderer.point_light_records.assign(static_cast<std::size_t>(submitted_light_count), GpuPointLight{});
+    const int shadow_face_count = (shadows_ready && shadow_atlas.shadowed_lights > 0)
+        ? submitted_light_count * kPointShadowFaceCount
+        : 0;
+    renderer.point_shadow_faces.assign(static_cast<std::size_t>(shadow_face_count), GpuPointShadowFace{});
     for (int i = 0; i < submitted_light_count; ++i) {
         const PointLight& light = lights[static_cast<std::size_t>(i)];
-        GpuPointLight& record = point_light_records[static_cast<std::size_t>(i)];
+        GpuPointLight& record = renderer.point_light_records[static_cast<std::size_t>(i)];
         record.position_radius = {light.position.x, light.position.y, light.position.z, light.radius};
         record.color_intensity = {light.color.x, light.color.y, light.color.z, light.intensity};
+        record.shadow_flags[1] = std::max(light.shadow_bias, 0.0F);
     }
-    if (shadows_ready) {
+    if (shadow_face_count > 0) {
         const float inv_atlas = 1.0F / static_cast<float>(std::max(shadow_atlas.atlas_size, 1));
         for (const PointShadowAtlasEntry& entry : shadow_atlas.entries) {
             if (!entry.shadowed || entry.light_index < 0 || entry.light_index >= submitted_light_count) {
                 continue;
             }
-            point_light_records[static_cast<std::size_t>(entry.light_index)].shadow_flags[0] = 1.0F;
+            renderer.point_light_records[static_cast<std::size_t>(entry.light_index)].shadow_flags[0] = 1.0F;
             const PointLight& light = lights[static_cast<std::size_t>(entry.light_index)];
             const std::array<Mat4, kPointShadowFaceCount> matrices = point_shadow_matrices(light);
             for (int face = 0; face < kPointShadowFaceCount; ++face) {
                 const int shadow_index = (entry.light_index * kPointShadowFaceCount) + face;
                 const ShadowAtlasRect rect = entry.faces[static_cast<std::size_t>(face)];
-                GpuPointShadowFace& shadow_face = point_shadow_faces[static_cast<std::size_t>(shadow_index)];
+                GpuPointShadowFace& shadow_face = renderer.point_shadow_faces[static_cast<std::size_t>(shadow_index)];
                 shadow_face.rect = {
                     static_cast<float>(rect.x) * inv_atlas,
                     static_cast<float>(rect.y) * inv_atlas,
@@ -731,20 +911,23 @@ int draw_deferred_runtime_world(
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, renderer.point_light_buffer);
     glBufferData(
         GL_SHADER_STORAGE_BUFFER,
-        static_cast<GLsizeiptr>(point_light_records.size() * sizeof(GpuPointLight)),
-        point_light_records.data(),
+        static_cast<GLsizeiptr>(renderer.point_light_records.size() * sizeof(GpuPointLight)),
+        renderer.point_light_records.empty() ? nullptr : renderer.point_light_records.data(),
         GL_DYNAMIC_DRAW
     );
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, renderer.point_light_buffer);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, renderer.point_shadow_face_buffer);
-    glBufferData(
-        GL_SHADER_STORAGE_BUFFER,
-        static_cast<GLsizeiptr>(point_shadow_faces.size() * sizeof(GpuPointShadowFace)),
-        point_shadow_faces.data(),
-        GL_DYNAMIC_DRAW
-    );
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, renderer.point_shadow_face_buffer);
+    if (shadow_face_count > 0) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, renderer.point_shadow_face_buffer);
+        glBufferData(
+            GL_SHADER_STORAGE_BUFFER,
+            static_cast<GLsizeiptr>(renderer.point_shadow_faces.size() * sizeof(GpuPointShadowFace)),
+            renderer.point_shadow_faces.data(),
+            GL_DYNAMIC_DRAW
+        );
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, renderer.point_shadow_face_buffer);
+    }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    renderer.last_shadow_pack_upload_ms += elapsed_ms(upload_start);
 
     glBegin(GL_QUADS);
     glVertex2f(-1.0F, -1.0F);
@@ -755,6 +938,8 @@ int draw_deferred_runtime_world(
     glUseProgram(0);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE4);
@@ -767,8 +952,10 @@ int draw_deferred_runtime_world(
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
+    renderer.last_lighting_ms = elapsed_ms(lighting_start);
 
     if (draw_wire_overlay) {
+        const auto wire_start = std::chrono::steady_clock::now();
         set_game_projection(width, height, camera, config);
         glDisable(GL_DEPTH_TEST);
         glBegin(GL_LINES);
@@ -788,6 +975,7 @@ int draw_deferred_runtime_world(
             glVertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
         }
         glEnd();
+        renderer.last_wire_overlay_ms = elapsed_ms(wire_start);
     }
 
     return visible_triangle_count;

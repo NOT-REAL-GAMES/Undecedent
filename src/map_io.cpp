@@ -818,7 +818,7 @@ std::string write_sector_payload(const SectorPlane& sector) {
 std::string write_entities_payload(const PlayerSpawn& player_spawn, const std::vector<PointLight>& point_lights) {
     std::ostringstream output;
     output << std::setprecision(std::numeric_limits<float>::max_digits10);
-    output << "entities 1\n";
+    output << "entities 2\n";
     if (player_spawn.set) {
         output << "player_spawn "
                << player_spawn.id << ' '
@@ -840,7 +840,8 @@ std::string write_entities_payload(const PlayerSpawn& player_spawn, const std::v
                << light.color.y << ' '
                << light.color.z << ' '
                << light.radius << ' '
-               << light.intensity << '\n';
+               << light.intensity << ' '
+               << std::max(light.shadow_bias, 0.0F) << '\n';
     }
     return output.str();
 }
@@ -929,7 +930,7 @@ bool read_entities_payload(
         return false;
     }
     int version = 0;
-    if (!(input >> version) || version != 1) {
+    if (!(input >> version) || version < 1 || version > 2) {
         message = "Unsupported entities chunk version.";
         return false;
     }
@@ -996,12 +997,19 @@ bool read_entities_payload(
             !read_float(input, light.intensity, message)) {
             return false;
         }
+        if (version >= 2 && !read_float(input, light.shadow_bias, message)) {
+            return false;
+        }
         if (light.radius <= 0.0F) {
             message = "Point light radius must be greater than zero.";
             return false;
         }
         if (light.intensity < 0.0F) {
             message = "Point light intensity must be non-negative.";
+            return false;
+        }
+        if (light.shadow_bias < 0.0F) {
+            message = "Point light shadow bias must be non-negative.";
             return false;
         }
         point_lights.push_back(light);

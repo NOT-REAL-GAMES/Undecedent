@@ -26,6 +26,11 @@ undecedent::PointLight point_light(const std::uint64_t id, const float x) {
 
 int main() {
     {
+        const undecedent::PointLight light = undecedent::default_point_light_at(undecedent::Vec3{1.0F, 2.0F, 3.0F});
+        expect(light.shadow_bias == 2.0F, "default point light shadow bias should be 2 world units");
+    }
+
+    {
         undecedent::EditorWorld world;
         world.point_lights.push_back(point_light(10, 0.0F));
         world.point_lights.push_back(point_light(20, 32.0F));
@@ -47,6 +52,8 @@ int main() {
         expect(world.point_lights.front().radius == 1.0F, "point light radius clamps above zero");
         expect(undecedent::adjust_selected_entity_property(world, undecedent::EntityProperty::Intensity, -1000.0F), "intensity edit should apply");
         expect(world.point_lights.front().intensity == 0.0F, "point light intensity clamps non-negative");
+        expect(undecedent::adjust_selected_entity_property(world, undecedent::EntityProperty::ShadowBias, -1000.0F), "shadow bias edit should apply");
+        expect(world.point_lights.front().shadow_bias == 0.0F, "point light shadow bias clamps non-negative");
         expect(undecedent::adjust_selected_entity_property(world, undecedent::EntityProperty::ColorR, -1000.0F), "color edit should apply");
         expect(world.point_lights.front().color.x == 0.0F, "point light color clamps non-negative");
     }
@@ -82,6 +89,23 @@ int main() {
         expect(world.selected_entity.kind == undecedent::SelectedEntityKind::PlayerSpawn, "undo restores selected entity");
         expect(undecedent::redo_editor_action(world), "redo should reapply spawn edit");
         expect(world.player_spawn.position.x == 9.0F, "redo reapplies spawn position");
+    }
+
+    {
+        undecedent::EditorWorld world;
+        world.point_lights.push_back(point_light(10, 0.0F));
+        world.point_lights.front().shadow_bias = 3.0F;
+        undecedent::select_entity(world, undecedent::SelectedEntityRef{undecedent::SelectedEntityKind::PointLight, 10});
+        expect(
+            undecedent::adjust_selected_entity_property(world, undecedent::EntityProperty::ShadowBias, 0.5F),
+            "light shadow bias edit should apply"
+        );
+        expect(world.point_lights.front().shadow_bias == 3.5F, "shadow bias should change");
+        expect(undecedent::undo_editor_action(world), "undo should restore light shadow bias");
+        expect(world.point_lights.front().shadow_bias == 3.0F, "undo restores light shadow bias");
+        expect(world.selected_entity.kind == undecedent::SelectedEntityKind::PointLight, "undo restores selected point light");
+        expect(undecedent::redo_editor_action(world), "redo should reapply light shadow bias");
+        expect(world.point_lights.front().shadow_bias == 3.5F, "redo reapplies light shadow bias");
     }
 
     return EXIT_SUCCESS;

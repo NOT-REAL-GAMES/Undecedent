@@ -107,6 +107,7 @@ struct PointLight {
     Vec3 color{1.0F, 0.86F, 0.62F};
     float radius = 384.0F;
     float intensity = 1.5F;
+    float shadow_bias = 2.0F;
 };
 
 struct WorldLighting {

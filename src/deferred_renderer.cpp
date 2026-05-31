@@ -107,6 +107,62 @@ GLuint create_gbuffer_texture(
     return texture;
 }
 
+void cache_deferred_uniforms(DeferredRenderer& renderer) {
+    const GLuint lighting = renderer.lighting_program;
+    renderer.lighting_uniforms.position = glGetUniformLocation(lighting, "uPosition");
+    renderer.lighting_uniforms.normal = glGetUniformLocation(lighting, "uNormal");
+    renderer.lighting_uniforms.albedo = glGetUniformLocation(lighting, "uAlbedo");
+    renderer.lighting_uniforms.material = glGetUniformLocation(lighting, "uMaterial");
+    renderer.lighting_uniforms.screen_shadow_mask = glGetUniformLocation(lighting, "uScreenShadowMask");
+    renderer.lighting_uniforms.point_shadow_atlas = glGetUniformLocation(lighting, "uPointShadowAtlas");
+    renderer.lighting_uniforms.sun_shadow_moments = glGetUniformLocation(lighting, "uSunShadowMoments");
+    renderer.lighting_uniforms.inv_viewport = glGetUniformLocation(lighting, "uInvViewport");
+    renderer.lighting_uniforms.camera_position = glGetUniformLocation(lighting, "uCameraPosition");
+    renderer.lighting_uniforms.ambient_color = glGetUniformLocation(lighting, "uAmbientColor");
+    renderer.lighting_uniforms.light_count = glGetUniformLocation(lighting, "uLightCount");
+    renderer.lighting_uniforms.point_shadows_enabled = glGetUniformLocation(lighting, "uPointShadowsEnabled");
+    renderer.lighting_uniforms.sun_enabled = glGetUniformLocation(lighting, "uSunEnabled");
+    renderer.lighting_uniforms.sun_shadow_enabled = glGetUniformLocation(lighting, "uSunShadowEnabled");
+    renderer.lighting_uniforms.sun_direction = glGetUniformLocation(lighting, "uSunDirection");
+    renderer.lighting_uniforms.sun_color = glGetUniformLocation(lighting, "uSunColor");
+    renderer.lighting_uniforms.sun_intensity = glGetUniformLocation(lighting, "uSunIntensity");
+    renderer.lighting_uniforms.sun_shadow_matrix = glGetUniformLocation(lighting, "uSunShadowMatrix");
+    renderer.lighting_uniforms.screen_space_shadows_enabled =
+        glGetUniformLocation(lighting, "uScreenSpaceShadowsEnabled");
+
+    if (renderer.screen_shadow_program != 0) {
+        renderer.screen_shadow_uniforms.position =
+            glGetUniformLocation(renderer.screen_shadow_program, "uPosition");
+        renderer.screen_shadow_uniforms.normal =
+            glGetUniformLocation(renderer.screen_shadow_program, "uNormal");
+        renderer.screen_shadow_uniforms.albedo =
+            glGetUniformLocation(renderer.screen_shadow_program, "uAlbedo");
+        renderer.screen_shadow_uniforms.inv_viewport =
+            glGetUniformLocation(renderer.screen_shadow_program, "uInvViewport");
+        renderer.screen_shadow_uniforms.camera_position =
+            glGetUniformLocation(renderer.screen_shadow_program, "uCameraPosition");
+        renderer.screen_shadow_uniforms.camera_forward =
+            glGetUniformLocation(renderer.screen_shadow_program, "uCameraForward");
+        renderer.screen_shadow_uniforms.sun_direction =
+            glGetUniformLocation(renderer.screen_shadow_program, "uSunDirection");
+        renderer.screen_shadow_uniforms.view_projection_matrix =
+            glGetUniformLocation(renderer.screen_shadow_program, "uViewProjectionMatrix");
+    }
+
+    if (renderer.point_shadow_program != 0) {
+        renderer.point_shadow_uniforms.light_position =
+            glGetUniformLocation(renderer.point_shadow_program, "uLightPosition");
+        renderer.point_shadow_uniforms.light_radius =
+            glGetUniformLocation(renderer.point_shadow_program, "uLightRadius");
+        renderer.point_shadow_uniforms.light_matrix =
+            glGetUniformLocation(renderer.point_shadow_program, "uLightMatrix");
+    }
+    if (renderer.sun_shadow_program != 0) {
+        renderer.sun_shadow_uniforms.light_matrix =
+            glGetUniformLocation(renderer.sun_shadow_program, "uLightMatrix");
+    }
+}
+
 bool create_deferred_programs(DeferredRenderer& renderer) {
     static constexpr const char* geometry_vertex = R"(
 #version 120
@@ -154,6 +210,7 @@ uniform sampler2D uPosition;
 uniform sampler2D uNormal;
 uniform sampler2D uAlbedo;
 uniform sampler2D uMaterial;
+uniform sampler2D uScreenShadowMask;
 uniform sampler2D uPointShadowAtlas;
 uniform sampler2D uSunShadowMoments;
 uniform vec2 uInvViewport;
@@ -167,6 +224,7 @@ uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform float uSunIntensity;
 uniform mat4 uSunShadowMatrix;
+uniform bool uScreenSpaceShadowsEnabled;
 const int MAX_POINT_LIGHTS = 4096;
 const int POINT_SHADOW_FACE_COUNT = 6;
 struct PointLightRecord {
@@ -189,23 +247,34 @@ float saturate(float value) {
     return clamp(value, 0.0, 1.0);
 }
 const float EVSM_EXPONENT = 8.0;
-const float EVSM_DEPTH_BIAS = 0.004;
+const float EVSM_HARD_OCCLUDER_START = 0.0001;
+const float EVSM_HARD_OCCLUDER_END = 0.0012;
+const float EVSM_MIN_VARIANCE = 0.000002;
+const float EVSM_BLEED_REDUCTION = 0.68;
+const float POINT_SHADOW_ATLAS_TEXEL = 0.0001220703125;
+const float SUN_SHADOW_DEPTH_BIAS = 0.004;
 float evsm_depth(float depth) {
     return exp(EVSM_EXPONENT * (clamp(depth, 0.0, 1.0) - 1.0));
 }
 float reduce_light_bleeding(float p_max) {
-    const float amount = 0.45;
-    return clamp((p_max - amount) / (1.0 - amount), 0.0, 1.0);
+    return clamp((p_max - EVSM_BLEED_REDUCTION) / (1.0 - EVSM_BLEED_REDUCTION), 0.0, 1.0);
 }
-float evsm_visibility(vec2 moments, float receiver_depth) {
-    const float receiver = evsm_depth(receiver_depth - EVSM_DEPTH_BIAS);
+float evsm_visibility(vec2 moments, float receiver_depth, float depth_bias) {
+    const float biased_receiver_depth = clamp(receiver_depth - depth_bias, 0.0, 1.0);
+    const float receiver = evsm_depth(biased_receiver_depth);
     if (receiver <= moments.x) {
         return 1.0;
     }
-    float variance = max(moments.y - (moments.x * moments.x), 0.00002);
+    float mean_depth = 1.0 + (log(max(moments.x, 0.000001)) / EVSM_EXPONENT);
+    float hard_visibility = 1.0 - smoothstep(
+        EVSM_HARD_OCCLUDER_START,
+        EVSM_HARD_OCCLUDER_END,
+        biased_receiver_depth - mean_depth
+    );
+    float variance = max(moments.y - (moments.x * moments.x), EVSM_MIN_VARIANCE);
     float d = receiver - moments.x;
     float p_max = variance / (variance + (d * d));
-    return reduce_light_bleeding(p_max);
+    return min(reduce_light_bleeding(p_max), hard_visibility);
 }
 float point_shadow_visibility(int light_index, vec3 light_vector, float light_distance, float range) {
     if (!uPointShadowsEnabled || uPointLights[light_index].shadow_flags.x < 0.5 || range <= 1.0) {
@@ -231,10 +300,12 @@ float point_shadow_visibility(int light_index, vec3 light_vector, float light_di
         return 1.0;
     }
     float receiver_depth = clamp(light_distance / range, 0.0, 1.0);
+    float depth_bias = max(uPointLights[light_index].shadow_flags.y, 0.0) / range;
     vec4 rect = uPointShadowFaces[shadow_index].rect;
-    vec2 atlas_uv = rect.xy + (projected.xy * rect.zw);
+    vec2 atlas_span = max(rect.zw - vec2(POINT_SHADOW_ATLAS_TEXEL * 2.0), vec2(0.0));
+    vec2 atlas_uv = rect.xy + vec2(POINT_SHADOW_ATLAS_TEXEL) + (projected.xy * atlas_span);
     vec2 moments = texture(uPointShadowAtlas, atlas_uv).rg;
-    return evsm_visibility(moments, receiver_depth);
+    return evsm_visibility(moments, receiver_depth, depth_bias);
 }
 float sun_shadow_visibility(vec3 world_position) {
     if (!uSunEnabled || !uSunShadowEnabled) {
@@ -248,7 +319,7 @@ float sun_shadow_visibility(vec3 world_position) {
         return 1.0;
     }
     vec2 moments = texture(uSunShadowMoments, projected.xy).rg;
-    return evsm_visibility(moments, projected.z);
+    return evsm_visibility(moments, projected.z, SUN_SHADOW_DEPTH_BIAS);
 }
 float diffuse_shadow_visibility(float shadow) {
     return smoothstep(0.65, 1.0, shadow);
@@ -314,12 +385,15 @@ void main() {
         vec3 specular_lobe = distribution * visibility * fresnel;
         vec3 diffuse_lobe = diffuse_color / PI;
         float shadow = sun_shadow_visibility(world_position);
+        if (uScreenSpaceShadowsEnabled) {
+            shadow = min(shadow, texture2D(uScreenShadowMask, uv).r);
+        }
         float diffuse_shadow = diffuse_shadow_visibility(shadow);
         float specular_shadow = specular_shadow_visibility(shadow);
-        float diffuse_ndotl = diffuse_light_lobe(sun_ndotl);
-        float specular_ndotl = specular_light_lobe(sun_ndotl);
-        color += ((diffuse_lobe * diffuse_shadow * diffuse_ndotl) +
-            (specular_lobe * specular_shadow * specular_ndotl)) * uSunColor * uSunIntensity;
+        float diffuse_ndotl = diffuse_light_lobe(sun_ndotl * diffuse_shadow);
+        float specular_ndotl = specular_light_lobe(sun_ndotl * specular_shadow);
+        color += ((diffuse_lobe * diffuse_ndotl) +
+            (specular_lobe * specular_ndotl)) * uSunColor * uSunIntensity;
     }
     for (int i = 0; i < MAX_POINT_LIGHTS; ++i) {
         if (i >= uLightCount) {
@@ -346,10 +420,10 @@ void main() {
         float shadow = point_shadow_visibility(i, light_vector, light_distance, range);
         float diffuse_shadow = diffuse_shadow_visibility(shadow);
         float specular_shadow = specular_shadow_visibility(shadow);
-        float diffuse_ndotl = diffuse_light_lobe(ndotl);
-        float specular_ndotl = specular_light_lobe(ndotl);
-        color += ((diffuse_lobe * diffuse_shadow * diffuse_ndotl) +
-            (specular_lobe * specular_shadow * specular_ndotl)) * radiance;
+        float diffuse_ndotl = diffuse_light_lobe(ndotl * diffuse_shadow);
+        float specular_ndotl = specular_light_lobe(ndotl * specular_shadow);
+        color += ((diffuse_lobe * diffuse_ndotl) +
+            (specular_lobe * specular_ndotl)) * radiance;
     }
     gl_FragColor = vec4(color, 1.0);
 }
@@ -372,6 +446,140 @@ void main() {
     );
     if (renderer.lighting_program == 0) {
         return false;
+    }
+
+    static constexpr const char* screen_shadow_fragment = R"(
+#version 430 compatibility
+uniform sampler2D uPosition;
+uniform sampler2D uNormal;
+uniform sampler2D uAlbedo;
+uniform vec2 uInvViewport;
+uniform vec3 uCameraPosition;
+uniform vec3 uCameraForward;
+uniform vec3 uSunDirection;
+uniform mat4 uViewProjectionMatrix;
+const int SCREEN_SHADOW_MIN_STEPS = 8;
+const int SCREEN_SHADOW_MAX_STEPS = 24;
+const float SCREEN_SHADOW_DISTANCE = 112.0;
+const float SCREEN_SHADOW_NORMAL_BIAS = 0.75;
+const float SCREEN_SHADOW_DEPTH_BIAS = 0.75;
+const float SCREEN_SHADOW_MAX_THICKNESS = 48.0;
+const float SCREEN_SHADOW_MIN_VIEW_DEPTH = 0.25;
+const float SCREEN_SHADOW_STRENGTH = 0.88;
+const float SCREEN_SHADOW_EDGE_FADE_START = -0.015;
+const float SCREEN_SHADOW_EDGE_FADE_END = 0.035;
+const float SCREEN_SHADOW_OVERSCAN = 0.35;
+float saturate(float value) {
+    return clamp(value, 0.0, 1.0);
+}
+float hash12(vec2 value) {
+    vec3 p3 = fract(vec3(value.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+bool project_to_screen(vec3 position, out vec2 screen_uv) {
+    vec4 clip = uViewProjectionMatrix * vec4(position, 1.0);
+    if (clip.w <= 0.0001) {
+        return false;
+    }
+    vec3 projected = (clip.xyz / clip.w) * 0.5 + 0.5;
+    if (projected.x < -SCREEN_SHADOW_OVERSCAN || projected.x > 1.0 + SCREEN_SHADOW_OVERSCAN ||
+        projected.y < -SCREEN_SHADOW_OVERSCAN || projected.y > 1.0 + SCREEN_SHADOW_OVERSCAN ||
+        projected.z < -0.15 || projected.z > 1.15) {
+        return false;
+    }
+    screen_uv = clamp(projected.xy, vec2(0.0), vec2(1.0));
+    return true;
+}
+float screen_edge_fade(vec2 uv) {
+    float edge_distance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    return smoothstep(SCREEN_SHADOW_EDGE_FADE_START, SCREEN_SHADOW_EDGE_FADE_END, edge_distance);
+}
+void main() {
+    vec2 uv = gl_FragCoord.xy * uInvViewport;
+    vec3 albedo = texture2D(uAlbedo, uv).xyz;
+    if (dot(albedo, albedo) <= 0.000001) {
+        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+        return;
+    }
+
+    vec3 world_position = texture2D(uPosition, uv).xyz;
+    vec3 view_dir = normalize(uCameraPosition - world_position);
+    vec3 normal = normalize((texture2D(uNormal, uv).xyz * 2.0) - 1.0);
+    if (dot(normal, view_dir) < 0.0) {
+        normal = -normal;
+    }
+    vec3 sun_dir = normalize(-uSunDirection);
+    float receiver_depth = dot(world_position - uCameraPosition, uCameraForward);
+    if (receiver_depth <= SCREEN_SHADOW_MIN_VIEW_DEPTH) {
+        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+        return;
+    }
+
+    float normal_bias = clamp(receiver_depth * 0.01, 0.08, SCREEN_SHADOW_NORMAL_BIAS);
+    float depth_bias = clamp(receiver_depth * 0.004, 0.12, SCREEN_SHADOW_DEPTH_BIAS);
+    vec3 ray_origin = world_position + (normal * normal_bias);
+    vec3 ray_end = ray_origin + (sun_dir * SCREEN_SHADOW_DISTANCE);
+    vec2 end_uv = uv;
+    bool has_end = project_to_screen(ray_end, end_uv);
+    float pixel_span = has_end ? length((end_uv - uv) / max(uInvViewport, vec2(0.000001))) : 256.0;
+    int steps = int(clamp(floor(pixel_span * 0.075) + float(SCREEN_SHADOW_MIN_STEPS),
+        float(SCREEN_SHADOW_MIN_STEPS),
+        float(SCREEN_SHADOW_MAX_STEPS)));
+    float jitter = (hash12(gl_FragCoord.xy) - 0.5) / float(steps);
+    float occlusion = 0.0;
+    for (int step = 1; step <= SCREEN_SHADOW_MAX_STEPS; ++step) {
+        if (step > steps) {
+            break;
+        }
+        float fraction = saturate((float(step) / float(steps)) + jitter);
+        vec3 ray_position = ray_origin + (sun_dir * SCREEN_SHADOW_DISTANCE * fraction);
+        vec2 sample_uv;
+        if (!project_to_screen(ray_position, sample_uv)) {
+            break;
+        }
+        float sample_edge_fade = screen_edge_fade(sample_uv);
+        if (sample_edge_fade <= 0.0) {
+            break;
+        }
+        vec3 sample_albedo = texture2D(uAlbedo, sample_uv).xyz;
+        if (dot(sample_albedo, sample_albedo) <= 0.000001) {
+            continue;
+        }
+        vec3 sample_position = texture2D(uPosition, sample_uv).xyz;
+        float ray_depth = dot(ray_position - uCameraPosition, uCameraForward);
+        float sample_depth = dot(sample_position - uCameraPosition, uCameraForward);
+        if (ray_depth <= SCREEN_SHADOW_MIN_VIEW_DEPTH || sample_depth <= SCREEN_SHADOW_MIN_VIEW_DEPTH) {
+            continue;
+        }
+        float depth_delta = ray_depth - sample_depth;
+        if (depth_delta <= depth_bias || depth_delta > SCREEN_SHADOW_MAX_THICKNESS) {
+            continue;
+        }
+        float hit = smoothstep(depth_bias, depth_bias * 4.0, depth_delta);
+        float thickness_fade = 1.0 - smoothstep(
+            SCREEN_SHADOW_MAX_THICKNESS * 0.55,
+            SCREEN_SHADOW_MAX_THICKNESS,
+            depth_delta
+        );
+        float distance_fade = 1.0 - (fraction * 0.65);
+        occlusion = max(occlusion, hit * thickness_fade * distance_fade * sample_edge_fade);
+    }
+
+    float visibility = 1.0 - (occlusion * SCREEN_SHADOW_STRENGTH);
+    gl_FragColor = vec4(saturate(visibility), 1.0, 1.0, 1.0);
+}
+)";
+
+    renderer.screen_shadow_program = create_shader_program(
+        lighting_vertex,
+        screen_shadow_fragment,
+        "screen-space sun shadow",
+        false
+    );
+    if (renderer.screen_shadow_program == 0) {
+        renderer.screen_shadows_disabled = true;
+        std::cerr << "Screen-space sun shadows disabled; falling back to EVSM-only sun shadows.\n";
     }
 
     static constexpr const char* shadow_vertex = R"(
@@ -437,6 +645,7 @@ void main() {
         renderer.point_shadow_program = 0;
         renderer.shadows_disabled = true;
     }
+    cache_deferred_uniforms(renderer);
     return true;
 }
 
@@ -454,6 +663,9 @@ void destroy_deferred_renderer(DeferredRenderer& renderer) {
     }
     if (renderer.material_texture != 0) {
         glDeleteTextures(1, &renderer.material_texture);
+    }
+    if (renderer.screen_shadow_texture != 0) {
+        glDeleteTextures(1, &renderer.screen_shadow_texture);
     }
     if (renderer.point_shadow_texture != 0) {
         glDeleteTextures(1, &renderer.point_shadow_texture);
@@ -482,11 +694,17 @@ void destroy_deferred_renderer(DeferredRenderer& renderer) {
     if (renderer.shadow_framebuffer != 0) {
         glDeleteFramebuffers(1, &renderer.shadow_framebuffer);
     }
+    if (renderer.screen_shadow_framebuffer != 0) {
+        glDeleteFramebuffers(1, &renderer.screen_shadow_framebuffer);
+    }
     if (renderer.geometry_program != 0) {
         glDeleteProgram(renderer.geometry_program);
     }
     if (renderer.lighting_program != 0) {
         glDeleteProgram(renderer.lighting_program);
+    }
+    if (renderer.screen_shadow_program != 0) {
+        glDeleteProgram(renderer.screen_shadow_program);
     }
     if (renderer.point_shadow_program != 0) {
         glDeleteProgram(renderer.point_shadow_program);
@@ -509,6 +727,7 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
             return false;
         }
         glGenFramebuffers(1, &renderer.framebuffer);
+        glGenFramebuffers(1, &renderer.screen_shadow_framebuffer);
         glGenFramebuffers(1, &renderer.shadow_framebuffer);
         glGenRenderbuffers(1, &renderer.depth_renderbuffer);
         glGenRenderbuffers(1, &renderer.point_shadow_depth_renderbuffer);
@@ -528,6 +747,7 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
     if (renderer.width == width && renderer.height == height &&
         renderer.position_texture != 0 && renderer.normal_texture != 0 &&
         renderer.albedo_texture != 0 && renderer.material_texture != 0 &&
+        (renderer.screen_shadows_disabled || renderer.screen_shadow_texture != 0) &&
         shadow_resources_ready) {
         return true;
     }
@@ -546,11 +766,27 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
     if (renderer.material_texture != 0) {
         glDeleteTextures(1, &renderer.material_texture);
     }
+    if (renderer.screen_shadow_texture != 0) {
+        glDeleteTextures(1, &renderer.screen_shadow_texture);
+        renderer.screen_shadow_texture = 0;
+    }
 
     renderer.position_texture = create_gbuffer_texture(width, height, GL_RGB16F, GL_RGB, GL_FLOAT);
     renderer.normal_texture = create_gbuffer_texture(width, height, GL_RGB16F, GL_RGB, GL_FLOAT);
     renderer.albedo_texture = create_gbuffer_texture(width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
     renderer.material_texture = create_gbuffer_texture(width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+
+    if (!renderer.screen_shadows_disabled) {
+        renderer.screen_shadow_texture = create_gbuffer_texture(width, height, GL_R8, GL_RED, GL_UNSIGNED_BYTE);
+        if (renderer.screen_shadow_texture == 0 || glGetError() != GL_NO_ERROR) {
+            std::cerr << "Screen-space shadow mask allocation failed; falling back to EVSM-only sun shadows.\n";
+            renderer.screen_shadows_disabled = true;
+            if (renderer.screen_shadow_texture != 0) {
+                glDeleteTextures(1, &renderer.screen_shadow_texture);
+            }
+            renderer.screen_shadow_texture = 0;
+        }
+    }
 
     if (!renderer.shadows_disabled &&
         (renderer.point_shadow_texture == 0 ||
@@ -651,6 +887,23 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
         std::cerr << "Deferred framebuffer incomplete: 0x" << std::hex << status << std::dec << '\n';
         renderer.disabled = true;
         return false;
+    }
+
+    if (!renderer.screen_shadows_disabled && renderer.screen_shadow_texture != 0) {
+        glBindFramebuffer(GL_FRAMEBUFFER, renderer.screen_shadow_framebuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, renderer.screen_shadow_texture, 0);
+        const GLenum screen_draw_buffer = GL_COLOR_ATTACHMENT0;
+        glDrawBuffers(1, &screen_draw_buffer);
+        const GLenum screen_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (screen_status != GL_FRAMEBUFFER_COMPLETE) {
+            std::cerr << "Screen-space shadow framebuffer incomplete: 0x"
+                      << std::hex << screen_status << std::dec
+                      << "; falling back to EVSM-only sun shadows.\n";
+            renderer.screen_shadows_disabled = true;
+            glDeleteTextures(1, &renderer.screen_shadow_texture);
+            renderer.screen_shadow_texture = 0;
+        }
     }
 
     return true;

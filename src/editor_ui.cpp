@@ -96,6 +96,8 @@ float property_step(const EntityProperty property, const bool fine) {
         return fine ? 1.0F : 16.0F;
     case EntityProperty::Intensity:
         return fine ? 0.05F : 0.25F;
+    case EntityProperty::ShadowBias:
+        return fine ? 0.05F : 0.25F;
     case EntityProperty::PositionX:
     case EntityProperty::PositionY:
     case EntityProperty::PositionZ:
@@ -554,7 +556,8 @@ bool handle_entity_inspector_click(
         if (step_row(5, EntityProperty::ColorB)) return true;
         if (step_row(6, EntityProperty::Radius)) return true;
         if (step_row(7, EntityProperty::Intensity)) return true;
-        if (row_hit(9)) {
+        if (step_row(8, EntityProperty::ShadowBias)) return true;
+        if (row_hit(10)) {
             delete_selected_entity(editor_world);
             return true;
         }
@@ -674,6 +677,7 @@ void draw_entity_inspector(const EditorWorld& editor_world, const int width, con
             draw_row("BLUE", format_property_value(light->color.z));
             draw_row("RADIUS", format_property_value(light->radius));
             draw_row("POWER", format_property_value(light->intensity));
+            draw_row("BIAS", format_property_value(light->shadow_bias));
             gap();
             draw_button_rect(x + 8.0F, row_y + (static_cast<float>(row) * row_h), w - 16.0F, row_h - 2.0F, width, height);
             draw_ui_text("DELETE POINT LIGHT", x + 22.0F, row_y + (static_cast<float>(row) * row_h) + 7.0F, 4.8F, width, height);
