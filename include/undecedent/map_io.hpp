@@ -1,6 +1,7 @@
 #pragma once
 
 #include "undecedent/geometry.hpp"
+#include "undecedent/script.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -22,6 +23,7 @@ struct LoadMapResult {
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
     WorldLighting world_lighting;
+    ScriptStore scripts;
 };
 
 struct MapDirtyState {
@@ -30,6 +32,7 @@ struct MapDirtyState {
     bool metadata = false;
     bool materials = false;
     bool topology = false;
+    bool scripts = false;
 };
 
 SaveMapResult save_map_file(const std::vector<SectorPlane>& sectors, const std::filesystem::path& path);
@@ -51,6 +54,14 @@ SaveMapResult save_map_file(
     WorldLighting world_lighting,
     const std::filesystem::path& path
 );
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
+    const ScriptStore& scripts,
+    const std::filesystem::path& path
+);
 SaveMapResult save_map_file_dirty(
     const std::vector<SectorPlane>& sectors,
     PlayerSpawn player_spawn,
@@ -63,6 +74,15 @@ SaveMapResult save_map_file_dirty(
     PlayerSpawn player_spawn,
     const std::vector<PointLight>& point_lights,
     WorldLighting world_lighting,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+);
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
+    const ScriptStore& scripts,
     const MapDirtyState& dirty_state,
     const std::filesystem::path& path
 );

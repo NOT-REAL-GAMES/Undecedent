@@ -3,6 +3,7 @@
 #include "undecedent/geometry.hpp"
 #include "undecedent/runtime_geometry.hpp"
 
+#include <cstdint>
 #include <map>
 #include <utility>
 #include <vector>
@@ -48,6 +49,7 @@ struct RuntimePortal {
 };
 
 struct RuntimeSector {
+    std::uint64_t source_sector_id = 0;
     PolygonLoop outer;
     std::vector<PolygonLoop> holes;
     RuntimeBounds2 bounds;

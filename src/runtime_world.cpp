@@ -527,6 +527,7 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
         SectorPlane source = sectors[sector_index];
         normalize_materials(source);
         RuntimeSector runtime_sector;
+        runtime_sector.source_sector_id = source.id;
         runtime_sector.outer = source.outer;
         runtime_sector.holes = source.holes;
         runtime_sector.bounds = bounds_for_loop(source.outer);

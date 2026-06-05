@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -42,6 +43,31 @@ void trim_history_stack(std::vector<EditorHistorySnapshot>& stack) {
     if (stack.size() > kEditorHistoryLimit) {
         stack.erase(stack.begin(), stack.begin() + static_cast<std::ptrdiff_t>(stack.size() - kEditorHistoryLimit));
     }
+}
+
+bool prune_missing_sector_scripts(EditorWorld& editor_world) {
+    if (editor_world.scripts.sector_scripts.empty()) {
+        return false;
+    }
+
+    std::set<std::uint64_t> live_sector_ids;
+    for (const SectorPlane& sector : editor_world.sectors) {
+        if (sector.id != 0) {
+            live_sector_ids.insert(sector.id);
+        }
+    }
+
+    bool pruned = false;
+    for (auto it = editor_world.scripts.sector_scripts.begin();
+         it != editor_world.scripts.sector_scripts.end();) {
+        if (!live_sector_ids.contains(it->first)) {
+            it = editor_world.scripts.sector_scripts.erase(it);
+            pruned = true;
+        } else {
+            ++it;
+        }
+    }
+    return pruned;
 }
 
 Vec3 selected_axis_vector(const TranslationGizmoAxis axis) {
@@ -377,30 +403,18 @@ bool same_selected_entity(const SelectedEntityRef a, const SelectedEntityRef b) 
     return a.kind == b.kind && a.point_light_id == b.point_light_id;
 }
 
-PointLight* selected_point_light(EditorWorld& editor_world) {
+bool selected_point_light(const EditorWorld& editor_world, PointLight& out_light) {
     if (editor_world.selected_entity.kind != SelectedEntityKind::PointLight ||
         editor_world.selected_entity.point_light_id == 0) {
-        return nullptr;
+        return false;
     }
-    for (PointLight& light : editor_world.point_lights) {
+    for (const PointLight& light : point_lights_from_entities(editor_world.entities)) {
         if (light.id == editor_world.selected_entity.point_light_id) {
-            return &light;
+            out_light = light;
+            return true;
         }
     }
-    return nullptr;
-}
-
-const PointLight* selected_point_light(const EditorWorld& editor_world) {
-    if (editor_world.selected_entity.kind != SelectedEntityKind::PointLight ||
-        editor_world.selected_entity.point_light_id == 0) {
-        return nullptr;
-    }
-    for (const PointLight& light : editor_world.point_lights) {
-        if (light.id == editor_world.selected_entity.point_light_id) {
-            return &light;
-        }
-    }
-    return nullptr;
+    return false;
 }
 
 void clear_invalid_entity_selection(EditorWorld& editor_world) {
@@ -409,12 +423,15 @@ void clear_invalid_entity_selection(EditorWorld& editor_world) {
     case SelectedEntityKind::SunLight:
         return;
     case SelectedEntityKind::PlayerSpawn:
-        if (!editor_world.player_spawn.set) {
+        if (!player_spawn_from_entities(editor_world.entities).set) {
             editor_world.selected_entity = {};
         }
         return;
     case SelectedEntityKind::PointLight:
-        if (selected_point_light(editor_world) == nullptr) {
+        if (!entity_alive(
+                editor_world.entities,
+                point_light_entity_by_id(editor_world.entities, editor_world.selected_entity.point_light_id)
+            )) {
             editor_world.selected_entity = {};
         }
         return;
@@ -423,17 +440,10 @@ void clear_invalid_entity_selection(EditorWorld& editor_world) {
 
 void select_entity(EditorWorld& editor_world, SelectedEntityRef entity) {
     ensure_editor_stable_ids(editor_world);
-    if (entity.kind == SelectedEntityKind::PlayerSpawn && !editor_world.player_spawn.set) {
+    if (entity.kind == SelectedEntityKind::PlayerSpawn && !player_spawn_from_entities(editor_world.entities).set) {
         entity = {};
     } else if (entity.kind == SelectedEntityKind::PointLight) {
-        const bool exists = std::any_of(
-            editor_world.point_lights.begin(),
-            editor_world.point_lights.end(),
-            [entity](const PointLight& light) {
-                return light.id == entity.point_light_id;
-            }
-        );
-        if (!exists) {
+        if (!entity_alive(editor_world.entities, point_light_entity_by_id(editor_world.entities, entity.point_light_id))) {
             entity = {};
         }
     }
@@ -447,14 +457,15 @@ void clear_entity_selection(EditorWorld& editor_world) {
 bool selected_entity_position(const EditorWorld& editor_world, Vec3& out_position) {
     switch (editor_world.selected_entity.kind) {
     case SelectedEntityKind::PlayerSpawn:
-        if (!editor_world.player_spawn.set) {
+        if (const PlayerSpawn spawn = player_spawn_from_entities(editor_world.entities); spawn.set) {
+            out_position = spawn.position;
+            return true;
+        } else {
             return false;
         }
-        out_position = editor_world.player_spawn.position;
-        return true;
     case SelectedEntityKind::PointLight:
-        if (const PointLight* light = selected_point_light(editor_world)) {
-            out_position = light->position;
+        if (PointLight light; selected_point_light(editor_world, light)) {
+            out_position = light.position;
             return true;
         }
         return false;
@@ -467,16 +478,23 @@ bool selected_entity_position(const EditorWorld& editor_world, Vec3& out_positio
 
 bool move_selected_entity(EditorWorld& editor_world, const Vec3 position) {
     switch (editor_world.selected_entity.kind) {
-    case SelectedEntityKind::PlayerSpawn:
-        if (!editor_world.player_spawn.set) {
+    case SelectedEntityKind::PlayerSpawn: {
+        const EntityHandle entity = player_spawn_entity(editor_world.entities);
+        TransformComponent* transform = transform_component(editor_world.entities, entity);
+        if (transform == nullptr) {
             return false;
         }
-        editor_world.player_spawn.position = position;
+        transform->position = position;
         mark_entities_dirty(editor_world);
         return true;
+    }
     case SelectedEntityKind::PointLight:
-        if (PointLight* light = selected_point_light(editor_world)) {
-            light->position = position;
+        if (TransformComponent* transform =
+                transform_component(
+                    editor_world.entities,
+                    point_light_entity_by_id(editor_world.entities, editor_world.selected_entity.point_light_id)
+                )) {
+            transform->position = position;
             mark_entities_dirty(editor_world);
             return true;
         }
@@ -490,30 +508,26 @@ bool move_selected_entity(EditorWorld& editor_world, const Vec3 position) {
 
 bool delete_selected_entity(EditorWorld& editor_world) {
     switch (editor_world.selected_entity.kind) {
-    case SelectedEntityKind::PlayerSpawn:
-        if (!editor_world.player_spawn.set) {
+    case SelectedEntityKind::PlayerSpawn: {
+        const EntityHandle entity = player_spawn_entity(editor_world.entities);
+        if (!entity_alive(editor_world.entities, entity)) {
             return false;
         }
         push_undo_snapshot(editor_world, "delete player spawn");
-        editor_world.player_spawn = {};
+        destroy_entity(editor_world.entities, entity);
         clear_entity_selection(editor_world);
         mark_entities_dirty(editor_world);
         return true;
+    }
     case SelectedEntityKind::PointLight: {
-        const std::uint64_t id = editor_world.selected_entity.point_light_id;
-        const auto it = std::find_if(
-            editor_world.point_lights.begin(),
-            editor_world.point_lights.end(),
-            [id](const PointLight& light) {
-                return light.id == id;
-            }
-        );
-        if (it == editor_world.point_lights.end()) {
+        const EntityHandle entity =
+            point_light_entity_by_id(editor_world.entities, editor_world.selected_entity.point_light_id);
+        if (!entity_alive(editor_world.entities, entity)) {
             clear_invalid_entity_selection(editor_world);
             return false;
         }
         push_undo_snapshot(editor_world, "delete point light");
-        editor_world.point_lights.erase(it);
+        destroy_entity(editor_world.entities, entity);
         clear_entity_selection(editor_world);
         mark_entities_dirty(editor_world);
         return true;
@@ -534,28 +548,39 @@ bool adjust_selected_entity_property(EditorWorld& editor_world, const EntityProp
     push_undo_snapshot(editor_world, "entity property");
     bool changed = true;
     switch (kind) {
-    case SelectedEntityKind::PlayerSpawn:
-        if (!editor_world.player_spawn.set) {
+    case SelectedEntityKind::PlayerSpawn: {
+        const EntityHandle entity = player_spawn_entity(editor_world.entities);
+        TransformComponent* transform = transform_component(editor_world.entities, entity);
+        if (transform == nullptr) {
             changed = false;
             break;
         }
         switch (property) {
-        case EntityProperty::PositionX: editor_world.player_spawn.position.x += delta; break;
-        case EntityProperty::PositionY: editor_world.player_spawn.position.y += delta; break;
-        case EntityProperty::PositionZ: editor_world.player_spawn.position.z += delta; break;
-        case EntityProperty::Yaw: editor_world.player_spawn.yaw += delta; break;
+        case EntityProperty::PositionX: transform->position.x += delta; break;
+        case EntityProperty::PositionY: transform->position.y += delta; break;
+        case EntityProperty::PositionZ: transform->position.z += delta; break;
+        case EntityProperty::Yaw: transform->yaw += delta; break;
         default: changed = false; break;
         }
         if (changed) {
             mark_entities_dirty(editor_world);
         }
         break;
+    }
     case SelectedEntityKind::PointLight:
-        if (PointLight* light = selected_point_light(editor_world)) {
+        if (const EntityHandle entity =
+                point_light_entity_by_id(editor_world.entities, editor_world.selected_entity.point_light_id);
+            entity_alive(editor_world.entities, entity)) {
+            TransformComponent* transform = transform_component(editor_world.entities, entity);
+            PointLightComponent* light = point_light_component(editor_world.entities, entity);
+            if (transform == nullptr || light == nullptr) {
+                changed = false;
+                break;
+            }
             switch (property) {
-            case EntityProperty::PositionX: light->position.x += delta; break;
-            case EntityProperty::PositionY: light->position.y += delta; break;
-            case EntityProperty::PositionZ: light->position.z += delta; break;
+            case EntityProperty::PositionX: transform->position.x += delta; break;
+            case EntityProperty::PositionY: transform->position.y += delta; break;
+            case EntityProperty::PositionZ: transform->position.z += delta; break;
             case EntityProperty::ColorR: light->color.x = std::max(0.0F, light->color.x + delta); break;
             case EntityProperty::ColorG: light->color.y = std::max(0.0F, light->color.y + delta); break;
             case EntityProperty::ColorB: light->color.z = std::max(0.0F, light->color.z + delta); break;
@@ -647,14 +672,14 @@ EntityPick pick_editor_entity_2d(
         }
     };
 
-    if (editor_world.player_spawn.set) {
+    if (const PlayerSpawn spawn = player_spawn_from_entities(editor_world.entities); spawn.set) {
         consider(
             SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0},
-            editor_world.player_spawn.position,
-            editor_world.player_spawn.position.y - player_eye_height
+            spawn.position,
+            spawn.position.y - player_eye_height
         );
     }
-    for (const PointLight& light : editor_world.point_lights) {
+    for (const PointLight& light : point_lights_from_entities(editor_world.entities)) {
         consider(SelectedEntityRef{SelectedEntityKind::PointLight, light.id}, light.position, light.position.y);
     }
     return best;
@@ -684,10 +709,10 @@ EntityPick pick_editor_entity_3d(
         }
     };
 
-    if (editor_world.player_spawn.set) {
-        consider(SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0}, editor_world.player_spawn.position);
+    if (const PlayerSpawn spawn = player_spawn_from_entities(editor_world.entities); spawn.set) {
+        consider(SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0}, spawn.position);
     }
-    for (const PointLight& light : editor_world.point_lights) {
+    for (const PointLight& light : point_lights_from_entities(editor_world.entities)) {
         consider(SelectedEntityRef{SelectedEntityKind::PointLight, light.id}, light.position);
     }
     return best;
@@ -1001,6 +1026,7 @@ MapDirtyState editor_map_dirty_state(const EditorWorld& editor_world) {
         editor_world.dirty_metadata,
         editor_world.dirty_materials,
         editor_world.dirty_topology,
+        editor_world.dirty_scripts,
     };
 }
 
@@ -1010,6 +1036,7 @@ void clear_map_dirty_state(EditorWorld& editor_world) {
     editor_world.dirty_metadata = false;
     editor_world.dirty_materials = false;
     editor_world.dirty_topology = false;
+    editor_world.dirty_scripts = false;
 }
 
 void mark_sector_dirty(EditorWorld& editor_world, const std::size_t sector_index) {
@@ -1031,6 +1058,9 @@ void mark_entities_dirty(EditorWorld& editor_world) {
 
 void mark_topology_dirty(EditorWorld& editor_world) {
     ensure_editor_stable_ids(editor_world);
+    if (prune_missing_sector_scripts(editor_world)) {
+        editor_world.dirty_scripts = true;
+    }
     editor_world.dirty_topology = true;
     editor_world.dirty_sector_ids.clear();
 }
@@ -1056,11 +1086,15 @@ void ensure_editor_stable_ids(EditorWorld& editor_world) {
     for (SectorPlane& sector : editor_world.sectors) {
         assigned = ensure_id(sector.id) || assigned;
     }
-    if (editor_world.player_spawn.set) {
-        assigned = ensure_id(editor_world.player_spawn.id) || assigned;
+    EntityHandle selected_point_light_handle;
+    if (editor_world.selected_entity.kind == SelectedEntityKind::PointLight) {
+        selected_point_light_handle =
+            point_light_entity_by_id(editor_world.entities, editor_world.selected_entity.point_light_id);
     }
-    for (PointLight& light : editor_world.point_lights) {
-        assigned = ensure_id(light.id) || assigned;
+    assigned = ensure_entity_stable_ids(editor_world.entities, used, next_id) || assigned;
+    if (entity_alive(editor_world.entities, selected_point_light_handle)) {
+        editor_world.selected_entity.point_light_id =
+            entity_stable_id(editor_world.entities, selected_point_light_handle);
     }
     if (assigned) {
         editor_world.dirty_metadata = true;
@@ -1071,9 +1105,9 @@ EditorHistorySnapshot make_history_snapshot(const EditorWorld& editor_world) {
     return EditorHistorySnapshot{
         editor_world.sectors,
         editor_world.selected_sectors,
-        editor_world.player_spawn,
-        editor_world.point_lights,
+        editor_world.entities,
         editor_world.world_lighting,
+        editor_world.scripts,
         editor_world.slice_z,
         editor_world.selected_sector,
         editor_world.selected_entity,
@@ -1094,9 +1128,9 @@ void push_undo_snapshot(EditorWorld& editor_world, const char* label) {
 void restore_history_snapshot(EditorWorld& editor_world, const EditorHistorySnapshot& snapshot) {
     editor_world.sectors = snapshot.sectors;
     editor_world.selected_sectors = snapshot.selected_sectors;
-    editor_world.player_spawn = snapshot.player_spawn;
-    editor_world.point_lights = snapshot.point_lights;
+    editor_world.entities = snapshot.entities;
     editor_world.world_lighting = snapshot.world_lighting;
+    editor_world.scripts = snapshot.scripts;
     editor_world.slice_z = snapshot.slice_z;
     editor_world.selected_sector = snapshot.selected_sector;
     editor_world.selected_entity = snapshot.selected_entity;
@@ -1171,24 +1205,29 @@ PointLight default_point_light_at(const Vec3 position) {
 
 void place_entity(EditorWorld& editor_world, const Vec3 position, const float yaw) {
     push_undo_snapshot(editor_world, "place entity");
+    EntityHandle placed_entity;
     switch (editor_world.entity_placement) {
-    case EntityPlacementType::PlayerSpawn:
-        editor_world.player_spawn.position = position;
-        editor_world.player_spawn.yaw = yaw;
-        editor_world.player_spawn.set = true;
+    case EntityPlacementType::PlayerSpawn: {
+        PlayerSpawn spawn;
+        spawn.position = position;
+        spawn.yaw = yaw;
+        spawn.set = true;
+        placed_entity = set_player_spawn_entity(editor_world.entities, spawn);
         ensure_editor_stable_ids(editor_world);
         select_entity(editor_world, SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0});
         std::cout << "Placed player spawn at " << position.x << ", " << position.y << ", " << position.z << '\n';
         break;
-    case EntityPlacementType::PointLight:
-        editor_world.point_lights.push_back(default_point_light_at(position));
+    }
+    case EntityPlacementType::PointLight: {
+        placed_entity = add_point_light_entity(editor_world.entities, default_point_light_at(position));
         ensure_editor_stable_ids(editor_world);
         select_entity(
             editor_world,
-            SelectedEntityRef{SelectedEntityKind::PointLight, editor_world.point_lights.back().id}
+            SelectedEntityRef{SelectedEntityKind::PointLight, entity_stable_id(editor_world.entities, placed_entity)}
         );
         std::cout << "Placed point light at " << position.x << ", " << position.y << ", " << position.z << '\n';
         break;
+    }
     }
     mark_entities_dirty(editor_world);
 }
@@ -1205,9 +1244,11 @@ void place_entity_at_origin(
     }
 
     push_undo_snapshot(editor_world, "place entity");
-    editor_world.player_spawn.position = Vec3{origin.x, origin.y + player_eye_height, origin.z};
-    editor_world.player_spawn.yaw = yaw;
-    editor_world.player_spawn.set = true;
+    PlayerSpawn spawn;
+    spawn.position = Vec3{origin.x, origin.y + player_eye_height, origin.z};
+    spawn.yaw = yaw;
+    spawn.set = true;
+    set_player_spawn_entity(editor_world.entities, spawn);
     ensure_editor_stable_ids(editor_world);
     select_entity(editor_world, SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0});
     mark_entities_dirty(editor_world);

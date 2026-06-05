@@ -43,13 +43,14 @@ constexpr std::uint32_t kChunkEntities = fourcc('E', 'N', 'T', 'Y');
 constexpr std::uint32_t kChunkLighting = fourcc('L', 'I', 'T', 'E');
 constexpr std::uint32_t kChunkMaterials = fourcc('M', 'A', 'T', 'S');
 constexpr std::uint32_t kChunkEditorState = fourcc('E', 'D', 'S', 'T');
+constexpr std::uint32_t kChunkScripts = fourcc('S', 'C', 'R', 'P');
 
 SaveMapResult save_error(const std::string& message) {
     return SaveMapResult{false, message};
 }
 
 LoadMapResult load_error(const std::string& message) {
-    return LoadMapResult{false, message, {}, {}, {}, {}};
+    return LoadMapResult{false, message, {}, {}, {}, {}, {}};
 }
 
 std::uint32_t checksum_bytes(const std::vector<std::uint8_t>& bytes) {
@@ -405,7 +406,8 @@ LoadMapResult rebuild_loaded_sectors(
     std::vector<SectorPlane> sectors,
     const PlayerSpawn player_spawn,
     std::vector<PointLight> point_lights,
-    const WorldLighting world_lighting = {}
+    const WorldLighting world_lighting = {},
+    ScriptStore scripts = {}
 ) {
     for (std::size_t i = 0; i < sectors.size(); ++i) {
         SectorPlane& sector = sectors[i];
@@ -428,7 +430,8 @@ LoadMapResult rebuild_loaded_sectors(
         std::move(sectors),
         player_spawn,
         std::move(point_lights),
-        normalized_lighting(world_lighting)
+        normalized_lighting(world_lighting),
+        std::move(scripts)
     };
 }
 
@@ -870,6 +873,16 @@ std::string write_lighting_payload(const WorldLighting world_lighting) {
     return output.str();
 }
 
+bool script_store_empty(const ScriptStore& scripts) {
+    return !scripts.has_global_script && scripts.entity_scripts.empty() && scripts.sector_scripts.empty();
+}
+
+std::string write_scripts_payload(const ScriptStore& scripts) {
+    std::ostringstream output;
+    write_script_store_payload(output, scripts);
+    return output.str();
+}
+
 bool read_lighting_payload(std::istream& input, WorldLighting& world_lighting, std::string& message) {
     if (!read_expected(input, "lighting", message)) {
         return false;
@@ -916,6 +929,21 @@ bool read_lighting_payload(std::istream& input, WorldLighting& world_lighting, s
     if (input >> trailing) {
         message = "Unexpected trailing lighting token: " + trailing;
         return false;
+    }
+    return true;
+}
+
+bool validate_sector_script_ids(
+    const ScriptStore& scripts,
+    const std::set<std::uint64_t>& sector_ids,
+    std::string& message
+) {
+    for (const auto& [sector_id, program] : scripts.sector_scripts) {
+        (void)program;
+        if (!sector_ids.contains(sector_id)) {
+            message = "Sector script references missing sector id.";
+            return false;
+        }
     }
     return true;
 }
@@ -1050,7 +1078,8 @@ std::vector<ChunkRecord> build_chunk_records(
     std::vector<SectorPlane> sectors,
     PlayerSpawn player_spawn,
     std::vector<PointLight> point_lights,
-    const WorldLighting world_lighting
+    const WorldLighting world_lighting,
+    const ScriptStore& scripts
 ) {
     const std::uint64_t next_id = assign_missing_stable_ids(sectors, player_spawn, point_lights);
     std::vector<ChunkRecord> chunks;
@@ -1058,6 +1087,9 @@ std::vector<ChunkRecord> build_chunk_records(
     chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload())});
     chunks.push_back(ChunkRecord{kChunkLighting, kChunkFlagOptional, 0, string_payload(write_lighting_payload(world_lighting))});
     chunks.push_back(ChunkRecord{kChunkEntities, 0, 0, string_payload(write_entities_payload(player_spawn, point_lights))});
+    if (!script_store_empty(scripts)) {
+        chunks.push_back(ChunkRecord{kChunkScripts, kChunkFlagOptional, 0, string_payload(write_scripts_payload(scripts))});
+    }
     for (const SectorPlane& sector : sectors) {
         chunks.push_back(ChunkRecord{kChunkSector, 0, sector.id, string_payload(write_sector_payload(sector))});
     }
@@ -1246,6 +1278,7 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
     WorldLighting world_lighting;
+    ScriptStore scripts;
     std::vector<SectorPlane> sectors;
     std::set<std::uint64_t> sector_ids;
 
@@ -1280,6 +1313,13 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
             saw_entities = true;
             std::istringstream input(payload_string(payload));
             if (!read_entities_payload(input, player_spawn, point_lights, message)) {
+                return load_error(message);
+            }
+            continue;
+        }
+        if (entry.type == kChunkScripts && (entry.flags & kChunkFlagOptional) != 0U) {
+            std::istringstream input(payload_string(payload));
+            if (!read_script_store_payload(input, scripts, message)) {
                 return load_error(message);
             }
             continue;
@@ -1319,9 +1359,12 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
     if (!ids_are_unique(sectors, message)) {
         return load_error(message);
     }
+    if (!validate_sector_script_ids(scripts, sector_ids, message)) {
+        return load_error(message);
+    }
 
     LoadMapResult result =
-        rebuild_loaded_sectors(std::move(sectors), player_spawn, std::move(point_lights), world_lighting);
+        rebuild_loaded_sectors(std::move(sectors), player_spawn, std::move(point_lights), world_lighting, std::move(scripts));
     if (result.ok) {
         result.message = "Loaded chunked map.";
     }
@@ -1358,8 +1401,19 @@ SaveMapResult save_map_file(
     const WorldLighting world_lighting,
     const std::filesystem::path& path
 ) {
+    return save_map_file(sectors, player_spawn, point_lights, world_lighting, ScriptStore{}, path);
+}
+
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const ScriptStore& scripts,
+    const std::filesystem::path& path
+) {
     std::string error_message;
-    std::vector<ChunkRecord> chunks = build_chunk_records(sectors, player_spawn, point_lights, world_lighting);
+    std::vector<ChunkRecord> chunks = build_chunk_records(sectors, player_spawn, point_lights, world_lighting, scripts);
     if (!write_chunk_file(path, std::move(chunks), error_message)) {
         return save_error(error_message);
     }
@@ -1387,8 +1441,20 @@ SaveMapResult save_map_file_dirty(
     const MapDirtyState& dirty_state,
     const std::filesystem::path& path
 ) {
+    return save_map_file_dirty(sectors, player_spawn, point_lights, world_lighting, ScriptStore{}, dirty_state, path);
+}
+
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const ScriptStore& scripts,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+) {
     if (dirty_state.topology) {
-        return save_map_file(sectors, player_spawn, point_lights, world_lighting, path);
+        return save_map_file(sectors, player_spawn, point_lights, world_lighting, scripts, path);
     }
 
     std::vector<SectorPlane> sectors_with_ids = sectors;
@@ -1405,7 +1471,7 @@ SaveMapResult save_map_file_dirty(
         parse_chunk_directory(existing_bytes, existing_directory, read_message);
 
     if (!can_reuse_existing) {
-        return save_map_file(sectors_with_ids, spawn_with_id, lights_with_ids, world_lighting, path);
+        return save_map_file(sectors_with_ids, spawn_with_id, lights_with_ids, world_lighting, scripts, path);
     }
 
     auto existing_chunk = [&existing_bytes, &existing_directory](const std::uint32_t type, const std::uint64_t id, ChunkRecord& out) {
@@ -1443,6 +1509,14 @@ SaveMapResult save_map_file_dirty(
         chunks.push_back(std::move(reused));
     } else {
         chunks.push_back(ChunkRecord{kChunkEntities, 0, 0, string_payload(write_entities_payload(spawn_with_id, lights_with_ids))});
+    }
+
+    if (dirty_state.scripts || !existing_chunk(kChunkScripts, 0, reused)) {
+        if (!script_store_empty(scripts)) {
+            chunks.push_back(ChunkRecord{kChunkScripts, kChunkFlagOptional, 0, string_payload(write_scripts_payload(scripts))});
+        }
+    } else {
+        chunks.push_back(std::move(reused));
     }
 
     for (const SectorPlane& sector : sectors_with_ids) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "undecedent/entity.hpp"
 #include "undecedent/geometry.hpp"
 #include "undecedent/game_camera.hpp"
 #include "undecedent/map_io.hpp"
@@ -103,12 +104,32 @@ struct CommittedVertexRef {
 struct EditorHistorySnapshot {
     std::vector<SectorPlane> sectors;
     std::set<int> selected_sectors;
-    PlayerSpawn player_spawn;
-    std::vector<PointLight> point_lights;
+    EntityRegistry entities;
     WorldLighting world_lighting;
+    ScriptStore scripts;
     float slice_z = 0.0F;
     int selected_sector = -1;
     SelectedEntityRef selected_entity;
+};
+
+struct ScriptEditorDraft {
+    ScriptTargetRef target;
+    std::string source;
+    std::string status;
+    std::vector<std::string> undo_stack;
+    std::vector<std::string> redo_stack;
+    int caret = 0;
+    int selection_anchor = -1;
+    int scroll_line = 0;
+    bool dirty = false;
+    bool read_only = false;
+    bool compile_error = false;
+};
+
+struct ScriptEditorState {
+    bool open = false;
+    ScriptTargetRef current_target;
+    std::vector<ScriptEditorDraft> drafts;
 };
 
 struct EditorWorld {
@@ -120,9 +141,10 @@ struct EditorWorld {
     std::vector<EditorHistorySnapshot> undo_stack;
     std::vector<EditorHistorySnapshot> redo_stack;
     std::set<std::uint64_t> dirty_sector_ids;
-    PlayerSpawn player_spawn;
-    std::vector<PointLight> point_lights;
+    EntityRegistry entities;
     WorldLighting world_lighting;
+    ScriptStore scripts;
+    ScriptEditorState script_editor;
     RuntimeWorld runtime_world;
     RuntimeRenderCache runtime_render_cache;
     TriangulationResult draft_result;
@@ -154,6 +176,7 @@ struct EditorWorld {
     bool dirty_metadata = false;
     bool dirty_materials = false;
     bool dirty_topology = false;
+    bool dirty_scripts = false;
 };
 
 float screen_to_world_x(float screen_x, int width, const EditorCamera& camera);
@@ -184,8 +207,7 @@ void clear_selection_outside_slice(EditorWorld& editor_world);
 bool same_selected_entity(SelectedEntityRef a, SelectedEntityRef b);
 void select_entity(EditorWorld& editor_world, SelectedEntityRef entity);
 void clear_entity_selection(EditorWorld& editor_world);
-PointLight* selected_point_light(EditorWorld& editor_world);
-const PointLight* selected_point_light(const EditorWorld& editor_world);
+bool selected_point_light(const EditorWorld& editor_world, PointLight& out_light);
 bool selected_entity_position(const EditorWorld& editor_world, Vec3& out_position);
 bool move_selected_entity(EditorWorld& editor_world, Vec3 position);
 bool delete_selected_entity(EditorWorld& editor_world);

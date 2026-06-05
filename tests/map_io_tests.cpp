@@ -224,6 +224,101 @@ int main() {
     }
 
     {
+        const std::filesystem::path path = test_path("undecedent_map_io_script_chunk.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {16, 0}, {16, 16}, {0, 16}});
+        const undecedent::ScriptCompileResult compiled =
+            undecedent::compile_script("function on_map_start() { print(1); }");
+        expect(compiled.ok, "script should compile before map save");
+        undecedent::ScriptStore scripts;
+        undecedent::set_global_script(scripts, compiled.program);
+
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, scripts, path);
+        expect(saved.ok, "script-bearing map save should succeed");
+        expect(!chunk_payload(path, "SCRP", 0).empty(), "script-bearing save should include SCRP chunk");
+
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "script-bearing map load should succeed");
+        expect(loaded.scripts.has_global_script, "script chunk should restore global script");
+        expect(!loaded.scripts.global_script.instructions.empty(), "script chunk should restore bytecode");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_sector_script_chunk.udmap");
+        SectorPlane sector;
+        sector.id = 88;
+        sector.outer = loop({{0, 0}, {16, 0}, {16, 16}, {0, 16}});
+        const undecedent::ScriptCompileResult compiled =
+            undecedent::compile_script("function on_sector_enter() { print(8); }");
+        expect(compiled.ok, "sector script should compile before map save");
+        undecedent::ScriptStore scripts;
+        undecedent::set_sector_script(scripts, sector.id, compiled.program);
+
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, scripts, path);
+        expect(saved.ok, "sector-script map save should succeed");
+        expect(chunk_payload(path, "SCRP", 0).find("sector_scripts 1") != std::string::npos,
+            "script chunk should include sector script count");
+
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "sector-script map load should succeed");
+        expect(loaded.scripts.sector_scripts.contains(88), "script chunk should restore sector script");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_missing_sector_script.udmap");
+        const undecedent::ScriptCompileResult compiled =
+            undecedent::compile_script("function on_sector_enter() { print(8); }");
+        expect(compiled.ok, "missing-sector script should compile before map save");
+        undecedent::ScriptStore scripts;
+        undecedent::set_sector_script(scripts, 999, compiled.program);
+
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({}, {}, {}, {}, scripts, path);
+        expect(saved.ok, "missing-sector script setup save should succeed");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(!loaded.ok, "sector script referencing missing sector should reject");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_dirty_script_chunk.udmap");
+        SectorPlane sector;
+        sector.id = 77;
+        sector.outer = loop({{0, 0}, {16, 0}, {16, 16}, {0, 16}});
+        undecedent::ScriptStore scripts;
+        const undecedent::ScriptCompileResult first =
+            undecedent::compile_script("function on_map_start() { print(1); }");
+        expect(first.ok, "initial dirty script should compile");
+        undecedent::set_global_script(scripts, first.program);
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, scripts, path);
+        expect(saved.ok, "dirty script setup save should succeed");
+        const std::string sector_before = sector_chunk_payload(path, 77);
+        const std::string script_before = chunk_payload(path, "SCRP", 0);
+
+        const undecedent::ScriptCompileResult second =
+            undecedent::compile_script("function on_map_start() { print(2); }");
+        expect(second.ok, "replacement dirty script should compile");
+        undecedent::set_global_script(scripts, second.program);
+        undecedent::set_sector_script(scripts, 77, second.program);
+        undecedent::MapDirtyState dirty;
+        dirty.scripts = true;
+        const undecedent::SaveMapResult dirty_saved =
+            undecedent::save_map_file_dirty({sector}, {}, {}, {}, scripts, dirty, path);
+        expect(dirty_saved.ok, "dirty script save should succeed");
+        expect(sector_chunk_payload(path, 77) == sector_before, "dirty script save should preserve sector chunk");
+        expect(chunk_payload(path, "SCRP", 0) != script_before, "dirty script save should rewrite script chunk");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok && loaded.scripts.has_global_script, "dirty script map should load scripts");
+        expect(loaded.scripts.sector_scripts.contains(77), "dirty script map should load sector scripts");
+        std::filesystem::remove(path);
+    }
+
+    {
         const std::filesystem::path path = test_path("undecedent_map_io_displacement.udmap");
         SectorPlane sector;
         sector.outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});

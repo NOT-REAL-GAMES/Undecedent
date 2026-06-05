@@ -75,9 +75,11 @@ undecedent::GameCamera camera_at(
 int main() {
     {
         std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        sectors.front().id = 99;
         const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
         expect(world.cell_size == 128.0F, "runtime world should default to 128-unit cells");
         expect(world.sectors.size() == 1, "one source sector should create one runtime sector");
+        expect(world.sectors.front().source_sector_id == 99, "runtime sector should retain source sector id");
         expect(world.sectors.front().bounds.min_x == 0.0F && world.sectors.front().bounds.max_x == 10.0F,
             "runtime sector should store source bounds");
         expect(!world.spatial_cells.empty(), "runtime spatial hash should contain cells");

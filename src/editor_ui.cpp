@@ -3,6 +3,7 @@
 #include "undecedent/debug_draw.hpp"
 #include "undecedent/materials.hpp"
 #include "undecedent/screen_draw.hpp"
+#include "undecedent/sdf_text.hpp"
 
 #include <glad/glad.h>
 
@@ -145,8 +146,12 @@ void draw_ui_text(
     const int height,
     const float alpha = 0.92F
 ) {
+    const float sdf_size = size * 2.2F;
+    if (draw_sdf_text(label, x, y - 1.0F, sdf_size, width, height, SdfTextColor{1.0F, 1.0F, 1.0F, alpha})) {
+        return;
+    }
     core_begin(GL_LINES);
-    core_color4f(0.90F, 0.96F, 0.76F, alpha);
+    core_color4f(1.0F, 1.0F, 1.0F, alpha);
     draw_stroke_text(label, x, y, size, width, height);
     core_end();
 }
@@ -235,9 +240,13 @@ void draw_material_selector(const int active_material, const int width, const in
         draw_screen_line(sx + swatch, y, sx + swatch, y + swatch, width, height);
         draw_screen_line(sx + swatch, y + swatch, sx, y + swatch, width, height);
         draw_screen_line(sx, y + swatch, sx, y, width, height);
-        draw_stroke_text(std::to_string(i + 1), sx + 8.0F, y + swatch + 5.0F, 5.0F, width, height);
     }
     core_end();
+
+    for (int i = 0; i < kMaterialCount; ++i) {
+        const float sx = x + (static_cast<float>(i) * (swatch + gap));
+        draw_ui_text(std::to_string(i + 1), sx + 7.0F, y + swatch + 4.0F, 5.0F, width, height);
+    }
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -327,8 +336,8 @@ void draw_sculpt_button(
     draw_screen_line(x + 12.0F, y + 20.0F, x + 22.0F, y + 10.0F, width, height);
     draw_screen_line(x + 22.0F, y + 10.0F, x + 32.0F, y + 20.0F, width, height);
     draw_screen_line(x + 32.0F, y + 20.0F, x + 42.0F, y + 10.0F, width, height);
-    draw_stroke_text("SCULPT", x + 52.0F, y + 9.0F, 5.5F, width, height);
     core_end();
+    draw_ui_text("SCULPT", x + 52.0F, y + 8.0F, 5.5F, width, height);
     glLineWidth(1.0F);
 
     if (point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
@@ -349,9 +358,9 @@ void draw_sculpt_button(
         draw_screen_line(tooltip_x + tooltip_w, tooltip_y, tooltip_x + tooltip_w, tooltip_y + tooltip_h, width, height);
         draw_screen_line(tooltip_x + tooltip_w, tooltip_y + tooltip_h, tooltip_x, tooltip_y + tooltip_h, width, height);
         draw_screen_line(tooltip_x, tooltip_y + tooltip_h, tooltip_x, tooltip_y, width, height);
-        draw_stroke_text("SCULPT DISPLACEMENT", tooltip_x + 8.0F, tooltip_y + 9.0F, 5.0F, width, height);
-        draw_stroke_text(radius, tooltip_x + 8.0F, tooltip_y + 26.0F, 5.0F, width, height);
         core_end();
+        draw_ui_text("SCULPT DISPLACEMENT", tooltip_x + 8.0F, tooltip_y + 8.0F, 5.0F, width, height);
+        draw_ui_text(radius, tooltip_x + 8.0F, tooltip_y + 25.0F, 5.0F, width, height);
         glLineWidth(1.0F);
     }
     glDisable(GL_BLEND);
@@ -397,7 +406,7 @@ void draw_subdivision_controls(const EditorWorld& editor_world, const int width,
     const std::string label = has_selection
         ? "SUBDIV " + std::to_string(subdivision)
         : "SUBDIV -";
-    draw_stroke_text(label, x + 46.0F, y + 9.0F, 5.5F, width, height);
+    draw_ui_text(label, x + 46.0F, y + 8.0F, 5.5F, width, height);
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }
@@ -465,16 +474,18 @@ void draw_entity_dropdown(const EditorWorld& editor_world, const int width, cons
     draw_screen_line(x + w, y, x + w, y + row_h, width, height);
     draw_screen_line(x + w, y + row_h, x, y + row_h, width, height);
     draw_screen_line(x, y + row_h, x, y, width, height);
-    draw_stroke_text(entity_placement_label(editor_world.entity_placement), x + 10.0F, y + 8.0F, 5.5F, width, height);
     draw_screen_line(x + w - 22.0F, y + 11.0F, x + w - 14.0F, y + 19.0F, width, height);
     draw_screen_line(x + w - 14.0F, y + 19.0F, x + w - 6.0F, y + 11.0F, width, height);
 
     if (editor_world.entity_dropdown_open) {
         draw_screen_line(x, y + (row_h * 2.0F), x + w, y + (row_h * 2.0F), width, height);
-        draw_stroke_text("PLAYER SPAWN", x + 10.0F, y + row_h + 8.0F, 5.5F, width, height);
-        draw_stroke_text("POINT LIGHT", x + 10.0F, y + (row_h * 2.0F) + 8.0F, 5.5F, width, height);
     }
     core_end();
+    draw_ui_text(entity_placement_label(editor_world.entity_placement), x + 10.0F, y + 7.0F, 5.5F, width, height);
+    if (editor_world.entity_dropdown_open) {
+        draw_ui_text("PLAYER SPAWN", x + 10.0F, y + row_h + 7.0F, 5.5F, width, height);
+        draw_ui_text("POINT LIGHT", x + 10.0F, y + (row_h * 2.0F) + 7.0F, 5.5F, width, height);
+    }
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }
@@ -499,17 +510,18 @@ bool handle_entity_inspector_click(
     const float selector_h = 24.0F;
     const float chip_w = (w - 28.0F) / 3.0F;
     if (point_in_rect(mouse_x, mouse_y, x + 8.0F, selector_y, chip_w, selector_h)) {
-        if (editor_world.player_spawn.set) {
+        if (player_spawn_from_entities(editor_world.entities).set) {
             select_entity(editor_world, SelectedEntityRef{SelectedEntityKind::PlayerSpawn, 0});
         }
         return true;
     }
     if (point_in_rect(mouse_x, mouse_y, x + 14.0F + chip_w, selector_y, chip_w, selector_h)) {
         ensure_editor_stable_ids(editor_world);
-        if (!editor_world.point_lights.empty()) {
+        const std::vector<PointLight> point_lights = point_lights_from_entities(editor_world.entities);
+        if (!point_lights.empty()) {
             select_entity(
                 editor_world,
-                SelectedEntityRef{SelectedEntityKind::PointLight, editor_world.point_lights.front().id}
+                SelectedEntityRef{SelectedEntityKind::PointLight, point_lights.front().id}
             );
         }
         return true;
@@ -659,27 +671,27 @@ void draw_entity_inspector(const EditorWorld& editor_world, const int width, con
 
     switch (editor_world.selected_entity.kind) {
     case SelectedEntityKind::PlayerSpawn:
-        if (editor_world.player_spawn.set) {
-            draw_row("POS X", format_property_value(editor_world.player_spawn.position.x));
-            draw_row("POS Y", format_property_value(editor_world.player_spawn.position.y));
-            draw_row("POS Z", format_property_value(editor_world.player_spawn.position.z));
-            draw_row("YAW", format_property_value(editor_world.player_spawn.yaw));
+        if (const PlayerSpawn spawn = player_spawn_from_entities(editor_world.entities); spawn.set) {
+            draw_row("POS X", format_property_value(spawn.position.x));
+            draw_row("POS Y", format_property_value(spawn.position.y));
+            draw_row("POS Z", format_property_value(spawn.position.z));
+            draw_row("YAW", format_property_value(spawn.yaw));
             gap();
             draw_button_rect(x + 8.0F, row_y + (static_cast<float>(row) * row_h), w - 16.0F, row_h - 2.0F, width, height);
             draw_ui_text("UNSET PLAYER SPAWN", x + 20.0F, row_y + (static_cast<float>(row) * row_h) + 7.0F, 4.8F, width, height);
         }
         break;
     case SelectedEntityKind::PointLight:
-        if (const PointLight* light = selected_point_light(editor_world)) {
-            draw_row("POS X", format_property_value(light->position.x));
-            draw_row("POS Y", format_property_value(light->position.y));
-            draw_row("POS Z", format_property_value(light->position.z));
-            draw_row("RED", format_property_value(light->color.x));
-            draw_row("GREEN", format_property_value(light->color.y));
-            draw_row("BLUE", format_property_value(light->color.z));
-            draw_row("RADIUS", format_property_value(light->radius));
-            draw_row("POWER", format_property_value(light->intensity));
-            draw_row("BIAS", format_property_value(light->shadow_bias));
+        if (PointLight light; selected_point_light(editor_world, light)) {
+            draw_row("POS X", format_property_value(light.position.x));
+            draw_row("POS Y", format_property_value(light.position.y));
+            draw_row("POS Z", format_property_value(light.position.z));
+            draw_row("RED", format_property_value(light.color.x));
+            draw_row("GREEN", format_property_value(light.color.y));
+            draw_row("BLUE", format_property_value(light.color.z));
+            draw_row("RADIUS", format_property_value(light.radius));
+            draw_row("POWER", format_property_value(light.intensity));
+            draw_row("BIAS", format_property_value(light.shadow_bias));
             gap();
             draw_button_rect(x + 8.0F, row_y + (static_cast<float>(row) * row_h), w - 16.0F, row_h - 2.0F, width, height);
             draw_ui_text("DELETE POINT LIGHT", x + 22.0F, row_y + (static_cast<float>(row) * row_h) + 7.0F, 4.8F, width, height);

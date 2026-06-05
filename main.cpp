@@ -37,6 +37,9 @@
 #include "undecedent/runtime_world.hpp"
 #include "undecedent/screen_draw.hpp"
 #include "undecedent/sdl_platform.hpp"
+#include "undecedent/sdf_text.hpp"
+#include "undecedent/script_editor.hpp"
+#include "undecedent/script_editor_ui.hpp"
 #include "undecedent/triangulator.hpp"
 
 namespace {
@@ -52,14 +55,18 @@ using undecedent::draw_point_lights_3d;
 using undecedent::draw_player_spawn_3d;
 using undecedent::draw_runtime_world;
 using undecedent::draw_stroke_text;
+using undecedent::draw_sdf_text;
 using undecedent::draw_entity_dropdown;
 using undecedent::draw_entity_inspector;
 using undecedent::draw_material_selector;
 using undecedent::draw_sculpt_button;
+using undecedent::draw_script_editor_workspace;
+using undecedent::draw_script_quick_buttons;
 using undecedent::draw_subdivision_controls;
 using undecedent::draw_translation_gizmo;
 using undecedent::screen_to_ndc_x;
 using undecedent::screen_to_ndc_y;
+using undecedent::sdf_text_shutdown;
 using undecedent::configure_gl_attributes;
 using undecedent::log_sdl_error;
 using undecedent::toggle_exclusive_fullscreen;
@@ -97,6 +104,9 @@ using undecedent::handle_entity_dropdown_click;
 using undecedent::kCoreQuads;
 using undecedent::handle_entity_inspector_click;
 using undecedent::handle_sculpt_button_click;
+using undecedent::handle_script_editor_mouse_click;
+using undecedent::handle_script_editor_mouse_wheel;
+using undecedent::handle_script_quick_button_click;
 using undecedent::handle_subdivision_controls_click;
 using undecedent::is_dragged_committed_ref;
 using undecedent::is_sector_selected;
@@ -121,6 +131,23 @@ using undecedent::screen_to_world_y;
 using undecedent::sector_at_point;
 using undecedent::sector_visible_in_slice;
 using undecedent::select_single_sector;
+using undecedent::script_editor_apply_dirty_before_save;
+using undecedent::script_editor_apply_current;
+using undecedent::script_editor_backspace;
+using undecedent::script_editor_clear_clean_drafts;
+using undecedent::script_editor_cut_selection;
+using undecedent::script_editor_delete;
+using undecedent::script_editor_has_dirty_drafts;
+using undecedent::script_editor_insert_tab;
+using undecedent::script_editor_insert_text;
+using undecedent::script_editor_local_redo;
+using undecedent::script_editor_local_undo;
+using undecedent::script_editor_move_caret;
+using undecedent::script_editor_newline;
+using undecedent::script_editor_replace_selection;
+using undecedent::script_editor_select_all;
+using undecedent::script_editor_selected_text;
+using undecedent::ScriptEditorMove;
 using undecedent::sculpt_displacement_at_pick;
 using undecedent::start_hole_plane;
 using undecedent::start_knife_tool;
@@ -289,6 +316,132 @@ bool point_in_screen_rect(
     const float h
 ) {
     return px >= x && px <= x + w && py >= y && py <= y + h;
+}
+
+void sync_script_text_input(SDL_Window* window, const EditorWorld& editor_world, bool& active) {
+    const bool should_be_active = editor_world.script_editor.open;
+    if (should_be_active == active) {
+        return;
+    }
+    if (should_be_active) {
+        if (!SDL_StartTextInput(window)) {
+            std::cout << "Cannot start script text input: " << SDL_GetError() << '\n';
+        }
+    } else {
+        SDL_StopTextInput(window);
+    }
+    active = should_be_active;
+}
+
+bool handle_script_editor_key_event(EditorWorld& editor_world, const SDL_KeyboardEvent& key_event) {
+    if (!editor_world.script_editor.open) {
+        return false;
+    }
+
+    const SDL_Keycode key = key_event.key;
+    const SDL_Scancode scancode = key_event.scancode;
+    const bool ctrl_down = (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
+    const bool shift_down = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+
+    if (ctrl_down && (key == SDLK_RETURN || scancode == SDL_SCANCODE_RETURN ||
+            key == SDLK_KP_ENTER || scancode == SDL_SCANCODE_KP_ENTER)) {
+        script_editor_apply_current(editor_world);
+        return true;
+    }
+    if (ctrl_down && (key == SDLK_A || scancode == SDL_SCANCODE_A)) {
+        script_editor_select_all(editor_world);
+        return true;
+    }
+    if (ctrl_down && (key == SDLK_C || scancode == SDL_SCANCODE_C)) {
+        const std::string selected = script_editor_selected_text(editor_world);
+        if (!selected.empty()) {
+            SDL_SetClipboardText(selected.c_str());
+        }
+        return true;
+    }
+    if (ctrl_down && (key == SDLK_X || scancode == SDL_SCANCODE_X)) {
+        std::string cut_text;
+        if (script_editor_cut_selection(editor_world, cut_text) && !cut_text.empty()) {
+            SDL_SetClipboardText(cut_text.c_str());
+        }
+        return true;
+    }
+    if (ctrl_down && (key == SDLK_V || scancode == SDL_SCANCODE_V)) {
+        char* text = SDL_GetClipboardText();
+        if (text != nullptr) {
+            script_editor_replace_selection(editor_world, text);
+            SDL_free(text);
+        }
+        return true;
+    }
+    if (ctrl_down && (key == SDLK_Z || scancode == SDL_SCANCODE_Z)) {
+        if (shift_down) {
+            script_editor_local_redo(editor_world);
+        } else {
+            script_editor_local_undo(editor_world);
+        }
+        return true;
+    }
+    if (ctrl_down && (key == SDLK_Y || scancode == SDL_SCANCODE_Y)) {
+        script_editor_local_redo(editor_world);
+        return true;
+    }
+    if (ctrl_down && (key == SDLK_S || scancode == SDL_SCANCODE_S)) {
+        return false;
+    }
+    if (ctrl_down && (key == SDLK_O || scancode == SDL_SCANCODE_O)) {
+        return false;
+    }
+
+    switch (key) {
+    case SDLK_ESCAPE:
+        editor_world.script_editor.open = false;
+        return true;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        script_editor_newline(editor_world);
+        return true;
+    case SDLK_TAB:
+        script_editor_insert_tab(editor_world);
+        return true;
+    case SDLK_BACKSPACE:
+        script_editor_backspace(editor_world);
+        return true;
+    case SDLK_DELETE:
+        script_editor_delete(editor_world);
+        return true;
+    case SDLK_LEFT:
+        script_editor_move_caret(editor_world, ScriptEditorMove::Left, shift_down);
+        return true;
+    case SDLK_RIGHT:
+        script_editor_move_caret(editor_world, ScriptEditorMove::Right, shift_down);
+        return true;
+    case SDLK_UP:
+        script_editor_move_caret(editor_world, ScriptEditorMove::Up, shift_down);
+        return true;
+    case SDLK_DOWN:
+        script_editor_move_caret(editor_world, ScriptEditorMove::Down, shift_down);
+        return true;
+    case SDLK_HOME:
+        script_editor_move_caret(editor_world, ScriptEditorMove::Home, shift_down);
+        return true;
+    case SDLK_END:
+        script_editor_move_caret(editor_world, ScriptEditorMove::End, shift_down);
+        return true;
+    case SDLK_PAGEUP:
+        script_editor_move_caret(editor_world, ScriptEditorMove::PageUp, shift_down);
+        return true;
+    case SDLK_PAGEDOWN:
+        script_editor_move_caret(editor_world, ScriptEditorMove::PageDown, shift_down);
+        return true;
+    default:
+        break;
+    }
+
+    if (key >= SDLK_F1 && key <= SDLK_F12) {
+        return false;
+    }
+    return !ctrl_down;
 }
 
 EffectsMenuLayout effects_menu_layout(const int width, const int height) {
@@ -547,7 +700,7 @@ void apply_player_spawn_to_camera(const undecedent::PlayerSpawn& spawn, GameCame
 }
 
 void spawn_playtest_camera(EditorWorld& editor_world, GameCamera& game_camera) {
-    undecedent::PlayerSpawn spawn = editor_world.player_spawn;
+    undecedent::PlayerSpawn spawn = undecedent::player_spawn_from_entities(editor_world.entities);
     if (!spawn.set) {
         spawn = fallback_player_spawn_from_sectors(editor_world.sectors);
     }
@@ -574,10 +727,147 @@ void reset_playtest_player_state(
         );
 }
 
+bool script_store_has_scripts(const undecedent::ScriptStore& scripts) {
+    return scripts.has_global_script || !scripts.entity_scripts.empty() || !scripts.sector_scripts.empty();
+}
+
+void sync_script_components(EditorWorld& editor_world) {
+    for (const auto& [entity_id, program] : editor_world.scripts.entity_scripts) {
+        (void)program;
+        const undecedent::EntityHandle entity =
+            undecedent::find_entity_by_stable_id(editor_world.entities, entity_id);
+        if (undecedent::entity_alive(editor_world.entities, entity)) {
+            undecedent::add_script(editor_world.entities, entity, undecedent::ScriptComponent{entity_id, true});
+        }
+    }
+}
+
+void reset_playtest_scripts(
+    undecedent::ScriptVm& vm,
+    bool& map_start_dispatched,
+    bool& runtime_failed,
+    std::uint64_t& current_sector_id
+) {
+    vm.log.clear();
+    map_start_dispatched = false;
+    runtime_failed = false;
+    current_sector_id = 0;
+}
+
+void dispatch_playtest_scripts(
+    undecedent::ScriptVm& vm,
+    EditorWorld& editor_world,
+    const GameCamera& game_camera,
+    bool& map_start_dispatched,
+    bool& runtime_failed,
+    std::uint64_t& current_sector_id
+) {
+    if (runtime_failed || !script_store_has_scripts(editor_world.scripts)) {
+        return;
+    }
+
+    const auto handle_result = [&runtime_failed](const undecedent::ScriptRunResult& result) {
+        if (!result.ok) {
+            std::cout << "Script runtime error: " << result.message << '\n';
+            runtime_failed = true;
+        }
+    };
+
+    const auto handle_results = [&handle_result, &runtime_failed](const std::vector<undecedent::ScriptRunResult>& results) {
+        for (const undecedent::ScriptRunResult& result : results) {
+            handle_result(result);
+            if (runtime_failed) {
+                return;
+            }
+        }
+    };
+
+    if (!map_start_dispatched) {
+        handle_results(undecedent::run_script_store_event(
+            vm,
+            editor_world.entities,
+            editor_world.scripts,
+            "on_map_start"
+        ));
+        map_start_dispatched = true;
+        if (runtime_failed) {
+            return;
+        }
+    }
+
+    const int runtime_sector = undecedent::sector_at_point(
+        editor_world.runtime_world,
+        undecedent::Vec3{game_camera.x, game_camera.y, game_camera.z}
+    );
+    std::uint64_t next_sector_id = 0;
+    if (runtime_sector >= 0 && runtime_sector < static_cast<int>(editor_world.runtime_world.sectors.size())) {
+        next_sector_id = editor_world.runtime_world.sectors[static_cast<std::size_t>(runtime_sector)].source_sector_id;
+    }
+
+    if (current_sector_id != next_sector_id) {
+        if (current_sector_id != 0) {
+            handle_result(undecedent::run_sector_script_event(
+                vm,
+                editor_world.entities,
+                editor_world.scripts,
+                current_sector_id,
+                "on_sector_exit"
+            ));
+            if (runtime_failed) {
+                return;
+            }
+        }
+        current_sector_id = next_sector_id;
+        if (current_sector_id != 0) {
+            handle_result(undecedent::run_sector_script_event(
+                vm,
+                editor_world.entities,
+                editor_world.scripts,
+                current_sector_id,
+                "on_sector_enter"
+            ));
+            if (runtime_failed) {
+                return;
+            }
+        }
+    }
+
+    if (current_sector_id != 0) {
+        handle_result(undecedent::run_sector_script_event(
+            vm,
+            editor_world.entities,
+            editor_world.scripts,
+            current_sector_id,
+            "on_sector_stay"
+        ));
+        if (runtime_failed) {
+            return;
+        }
+    }
+
+    handle_results(undecedent::run_script_store_event(
+        vm,
+        editor_world.entities,
+        editor_world.scripts,
+        "on_tick"
+    ));
+
+    if (!vm.log.empty()) {
+        for (const std::string& line : vm.log) {
+            std::cout << "Script: " << line << '\n';
+        }
+        vm.log.clear();
+    }
+}
+
 void process_pending_map_dialogs(
     EditorWorld& editor_world,
     GameCamera& game_camera,
     PlaytestPlayerState& playtest_state,
+    undecedent::ScriptVm& script_vm,
+    bool& script_map_start_dispatched,
+    bool& script_runtime_failed,
+    std::uint64_t& script_current_sector_id,
     const bool editor_enabled,
     MapDialogRequests& requests
 ) {
@@ -604,14 +894,16 @@ void process_pending_map_dialogs(
         const undecedent::SaveMapResult result =
             undecedent::save_map_file_dirty(
                 editor_world.sectors,
-                editor_world.player_spawn,
-                editor_world.point_lights,
+                undecedent::player_spawn_from_entities(editor_world.entities),
+                undecedent::point_lights_from_entities(editor_world.entities),
                 editor_world.world_lighting,
+                editor_world.scripts,
                 undecedent::editor_map_dirty_state(editor_world),
                 save_path
             );
         if (result.ok) {
             undecedent::clear_map_dirty_state(editor_world);
+            undecedent::script_editor_clear_clean_drafts(editor_world);
         }
         std::cout << result.message << '\n';
     }
@@ -627,19 +919,56 @@ void process_pending_map_dialogs(
         cancel_plane_tool(editor_world);
         push_undo_snapshot(editor_world, "load map");
         editor_world.sectors = result.sectors;
-        editor_world.player_spawn = result.player_spawn;
-        editor_world.point_lights = result.point_lights;
+        editor_world.entities = undecedent::entity_registry_from_authored_entities(
+            result.player_spawn,
+            result.point_lights
+        );
         editor_world.world_lighting = result.world_lighting;
+        editor_world.scripts = result.scripts;
+        editor_world.script_editor = {};
+        sync_script_components(editor_world);
         clear_sector_selection(editor_world);
         clear_entity_selection(editor_world);
         rebuild_runtime_geometry(editor_world);
         undecedent::clear_map_dirty_state(editor_world);
         if (!editor_enabled) {
+            reset_playtest_scripts(
+                script_vm,
+                script_map_start_dispatched,
+                script_runtime_failed,
+                script_current_sector_id
+            );
             spawn_playtest_camera(editor_world, game_camera);
             reset_playtest_player_state(playtest_state, editor_world.runtime_world, game_camera);
         }
         std::cout << result.message << " Sectors: " << editor_world.sectors.size() << '\n';
     }
+}
+
+void draw_overlay_text(
+    const std::string& label,
+    const float x,
+    const float y,
+    const float stroke_size,
+    const int width,
+    const int height,
+    const float alpha = 0.92F
+) {
+    if (draw_sdf_text(
+            label,
+            x,
+            y - 1.0F,
+            stroke_size * 2.2F,
+            width,
+            height,
+            undecedent::SdfTextColor{1.0F, 1.0F, 1.0F, alpha}
+        )) {
+        return;
+    }
+    core_begin(GL_LINES);
+    core_color4f(1.0F, 1.0F, 1.0F, alpha);
+    draw_stroke_text(label, x, y, stroke_size, width, height);
+    core_end();
 }
 
 void draw_fps_counter(const int fps, const int width, const int height) {
@@ -660,10 +989,7 @@ void draw_fps_counter(const int fps, const int width, const int height) {
     core_end();
 
     glLineWidth(1.5F);
-    core_begin(GL_LINES);
-    core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
-    draw_stroke_text(label, x, y, size, width, height);
-    core_end();
+    draw_overlay_text(label, x, y, size, width, height);
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -711,12 +1037,9 @@ void draw_profiler_overlay(
     core_end();
 
     glLineWidth(1.35F);
-    core_begin(GL_LINES);
-    core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     for (std::size_t i = 0; i < lines.size(); ++i) {
-        draw_stroke_text(lines[i], x, top_y + static_cast<float>(i) * line_height, size, width, height);
+        draw_overlay_text(lines[i], x, top_y + static_cast<float>(i) * line_height, size, width, height);
     }
-    core_end();
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -748,8 +1071,8 @@ void draw_effects_menu(const GameRenderConfig& config, const int width, const in
     core_begin(GL_LINES);
     core_color4f(0.90F, 0.96F, 0.76F, 0.96F);
     draw_screen_rect_outline(layout.x, layout.y, layout.w, layout.h, width, height);
-    draw_stroke_text("EFFECTS", layout.x + 10.0F, layout.y + 9.0F, 5.5F, width, height);
     core_end();
+    draw_overlay_text("EFFECTS", layout.x + 10.0F, layout.y + 9.0F, 5.5F, width, height, 0.96F);
 
     constexpr float title_h = 30.0F;
     for (int i = 0; i < 4; ++i) {
@@ -768,10 +1091,10 @@ void draw_effects_menu(const GameRenderConfig& config, const int width, const in
 
         core_begin(GL_LINES);
         core_color4f(0.90F, 0.96F, 0.76F, 0.95F);
-        draw_stroke_text(rows[i].label, layout.x + 14.0F, row_y + 9.0F, 5.5F, width, height);
-        draw_stroke_text(rows[i].enabled ? "ON" : "OFF", toggle_x + 7.0F, row_y + 10.0F, 4.8F, width, height);
         draw_screen_rect_outline(toggle_x, toggle_y, 40.0F, 16.0F, width, height);
         core_end();
+        draw_overlay_text(rows[i].label, layout.x + 14.0F, row_y + 9.0F, 5.5F, width, height, 0.95F);
+        draw_overlay_text(rows[i].enabled ? "ON" : "OFF", toggle_x + 7.0F, row_y + 10.0F, 4.8F, width, height, 0.95F);
     }
 
     glLineWidth(1.0F);
@@ -937,6 +1260,11 @@ int main() {
     GameCamera game_camera{};
     PlaytestPlayerState playtest_state{};
     EditorWorld editor_world{};
+    undecedent::ScriptVm script_vm{};
+    bool script_map_start_dispatched = false;
+    bool script_runtime_failed = false;
+    std::uint64_t script_current_sector_id = 0;
+    bool script_text_input_active = false;
     const Editor2DRenderConfig editor_2d_render_config{
         kEditorMajorGridEvery,
         kEditorMinZoom,
@@ -999,6 +1327,13 @@ int main() {
                 running = false;
             }
 
+            if (event.type == SDL_EVENT_TEXT_INPUT && editor_world.script_editor.open && is_editor_mode(app_mode)) {
+                if (event.text.text != nullptr) {
+                    script_editor_insert_text(editor_world, event.text.text);
+                }
+                continue;
+            }
+
             if (event.type == SDL_EVENT_KEY_DOWN) {
                 const SDL_Keycode key = event.key.key;
                 const SDL_Scancode scancode = event.key.scancode;
@@ -1006,6 +1341,15 @@ int main() {
                 const bool shift_down = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
                 const bool editor_2d = is_2d_editor_mode(app_mode);
                 const bool editor_3d = app_mode == AppMode::Editor3D;
+
+                if ((key == SDLK_F12 || scancode == SDL_SCANCODE_F12) && !event.key.repeat && is_editor_mode(app_mode)) {
+                    undecedent::toggle_script_editor(editor_world);
+                    continue;
+                }
+
+                if (is_editor_mode(app_mode) && handle_script_editor_key_event(editor_world, event.key)) {
+                    continue;
+                }
 
                 if (ctrl_down && (key == SDLK_Z || scancode == SDL_SCANCODE_Z) && !event.key.repeat && is_editor_mode(app_mode)) {
                     if (shift_down) {
@@ -1022,6 +1366,10 @@ int main() {
                 }
 
                 if (ctrl_down && (key == SDLK_S || scancode == SDL_SCANCODE_S) && !event.key.repeat) {
+                    if (!script_editor_apply_dirty_before_save(editor_world)) {
+                        std::cout << "Save blocked by script compile error.\n";
+                        continue;
+                    }
                     show_save_map_dialog(window, map_dialog_requests);
                     continue;
                 }
@@ -1211,8 +1559,20 @@ int main() {
                         if (is_editor_mode(app_mode)) {
                             previous_editor_mode = app_mode;
                         }
+                        if (!script_editor_apply_dirty_before_save(editor_world)) {
+                            std::cout << "Playtest blocked by script compile error.\n";
+                            continue;
+                        }
+                        editor_world.script_editor.open = false;
                         finish_committed_vertex_drag(editor_world);
                         cancel_plane_tool(editor_world);
+                        sync_script_components(editor_world);
+                        reset_playtest_scripts(
+                            script_vm,
+                            script_map_start_dispatched,
+                            script_runtime_failed,
+                            script_current_sector_id
+                        );
                         spawn_playtest_camera(editor_world, game_camera);
                         reset_playtest_player_state(playtest_state, editor_world.runtime_world, game_camera);
                         app_mode = AppMode::Playtest;
@@ -1244,6 +1604,35 @@ int main() {
                 if ((key == SDLK_F11 || event.key.scancode == SDL_SCANCODE_F11) && !event.key.repeat) {
                     toggle_exclusive_fullscreen(window, fullscreen_state);
                 }
+            }
+
+            if (editor_world.script_editor.open && is_editor_mode(app_mode) &&
+                event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT) {
+                int width = 0;
+                int height = 0;
+                SDL_GetWindowSizeInPixels(window, &width, &height);
+                handle_script_editor_mouse_click(editor_world, width, height, event.button.x, event.button.y);
+                continue;
+            }
+
+            if (editor_world.script_editor.open && is_editor_mode(app_mode) &&
+                event.type == SDL_EVENT_MOUSE_WHEEL) {
+                int width = 0;
+                int height = 0;
+                SDL_GetWindowSizeInPixels(window, &width, &height);
+                float scroll_y = event.wheel.y;
+                if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+                    scroll_y *= -1.0F;
+                }
+                handle_script_editor_mouse_wheel(
+                    editor_world,
+                    width,
+                    height,
+                    event.wheel.mouse_x,
+                    event.wheel.mouse_y,
+                    scroll_y
+                );
+                continue;
             }
 
             if (effects_menu_open && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
@@ -1284,6 +1673,9 @@ int main() {
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
+                if (handle_script_quick_button_click(editor_world, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
                 if (handle_entity_inspector_click(
                         editor_world,
                         width,
@@ -1312,6 +1704,9 @@ int main() {
                     continue;
                 }
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
+                if (handle_script_quick_button_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
                 if (handle_entity_inspector_click(
@@ -1685,6 +2080,7 @@ int main() {
                 }
             }
         }
+        sync_script_text_input(window, editor_world, script_text_input_active);
         events_ms = ticks_to_ms(events_start_ticks, SDL_GetTicksNS());
         const bool editor_2d_now = is_2d_editor_mode(app_mode);
         const bool editor_3d_now = app_mode == AppMode::Editor3D;
@@ -1693,6 +2089,10 @@ int main() {
             editor_world,
             game_camera,
             playtest_state,
+            script_vm,
+            script_map_start_dispatched,
+            script_runtime_failed,
+            script_current_sector_id,
             is_editor_mode(app_mode),
             map_dialog_requests
         );
@@ -1702,6 +2102,14 @@ int main() {
             update_editor_camera(editor_camera, dt);
         } else if (app_mode == AppMode::Playtest) {
             update_playtest_camera(game_camera, editor_world.runtime_world, playtest_state, dt, game_control_config());
+            dispatch_playtest_scripts(
+                script_vm,
+                editor_world,
+                game_camera,
+                script_map_start_dispatched,
+                script_runtime_failed,
+                script_current_sector_id
+            );
         } else {
             update_game_camera(game_camera, dt, game_control_config());
         }
@@ -1740,7 +2148,7 @@ int main() {
                     deferred_renderer,
                     editor_world.runtime_world,
                     editor_world.runtime_render_cache,
-                    editor_world.point_lights,
+                    undecedent::point_lights_from_entities(editor_world.entities),
                     editor_world.world_lighting,
                     width,
                     height,
@@ -1772,8 +2180,20 @@ int main() {
                 );
             }
             if (editor_3d_now) {
-                draw_point_lights_3d(editor_world.point_lights, width, height, game_camera, game_render_config);
-                draw_player_spawn_3d(editor_world.player_spawn, width, height, game_camera, game_render_config);
+                draw_point_lights_3d(
+                    undecedent::point_lights_from_entities(editor_world.entities),
+                    width,
+                    height,
+                    game_camera,
+                    game_render_config
+                );
+                draw_player_spawn_3d(
+                    undecedent::player_spawn_from_entities(editor_world.entities),
+                    width,
+                    height,
+                    game_camera,
+                    game_render_config
+                );
                 draw_translation_gizmo(editor_world, width, height, game_camera, game_render_config);
             }
         }
@@ -1823,6 +2243,8 @@ int main() {
             draw_sculpt_button(editor_world, width, height, mouse_x, mouse_y);
             draw_entity_dropdown(editor_world, width, height);
             draw_entity_inspector(editor_world, width, height);
+            draw_script_quick_buttons(editor_world, width, height);
+            draw_script_editor_workspace(editor_world, width, height);
         }
         overlay_ms = ticks_to_ms(overlay_start_ticks, SDL_GetTicksNS());
 
@@ -1914,8 +2336,12 @@ int main() {
         }
     }
 
+    if (script_text_input_active) {
+        SDL_StopTextInput(window);
+    }
     destroy_runtime_render_cache(editor_world.runtime_render_cache);
     undecedent::destroy_deferred_renderer(deferred_renderer);
+    sdf_text_shutdown();
     SDL_GL_DestroyContext(gl_context);
     SDL_DestroyWindow(window);
     SDL_Quit();

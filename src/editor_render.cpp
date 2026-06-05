@@ -2,6 +2,7 @@
 
 #include "undecedent/debug_draw.hpp"
 #include "undecedent/screen_draw.hpp"
+#include "undecedent/sdf_text.hpp"
 
 #include <glad/glad.h>
 
@@ -316,10 +317,18 @@ void draw_scale_indicator(
     core_end();
 
     glLineWidth(1.0F);
-    core_begin(GL_LINES);
-    draw_stroke_text(label, origin_x, label_y, 7.0F, width, height);
-    draw_stroke_text(z_label, origin_x, label_y - 18.0F, 7.0F, width, height);
-    core_end();
+    if (!draw_sdf_text(label, origin_x, label_y - 1.0F, 15.4F, width, height)) {
+        core_begin(GL_LINES);
+        core_color4f(1.0F, 1.0F, 1.0F, 0.92F);
+        draw_stroke_text(label, origin_x, label_y, 7.0F, width, height);
+        core_end();
+    }
+    if (!draw_sdf_text(z_label, origin_x, label_y - 19.0F, 15.4F, width, height)) {
+        core_begin(GL_LINES);
+        core_color4f(1.0F, 1.0F, 1.0F, 0.92F);
+        draw_stroke_text(z_label, origin_x, label_y - 18.0F, 7.0F, width, height);
+        core_end();
+    }
 
     glDisable(GL_BLEND);
 }
@@ -331,18 +340,19 @@ void draw_player_spawn_2d(
     const EditorCamera& camera,
     const Editor2DRenderConfig& config
 ) {
-    if (!editor_world.player_spawn.set || width <= 0 || height <= 0) {
+    const PlayerSpawn spawn = player_spawn_from_entities(editor_world.entities);
+    if (!spawn.set || width <= 0 || height <= 0) {
         return;
     }
 
-    const float spawn_floor = editor_world.player_spawn.position.y - config.player_eye_height;
+    const float spawn_floor = spawn.position.y - config.player_eye_height;
     const float visible_band = std::max(1.0F, editor_grid_world_step(camera.zoom) * 0.5F);
     if (std::abs(spawn_floor - editor_world.slice_z) > visible_band) {
         return;
     }
 
-    const float x = world_to_screen_x(editor_world.player_spawn.position.x, width, camera);
-    const float y = world_to_screen_y(editor_world.player_spawn.position.z, height, camera);
+    const float x = world_to_screen_x(spawn.position.x, width, camera);
+    const float y = world_to_screen_y(spawn.position.z, height, camera);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -351,8 +361,8 @@ void draw_player_spawn_2d(
     core_begin(GL_LINES);
     draw_screen_line(x - 10.0F, y, x + 10.0F, y, width, height);
     draw_screen_line(x, y - 10.0F, x, y + 10.0F, width, height);
-    const float facing_x = x - std::sin(editor_world.player_spawn.yaw) * 18.0F;
-    const float facing_y = y - std::cos(editor_world.player_spawn.yaw) * 18.0F;
+    const float facing_x = x - std::sin(spawn.yaw) * 18.0F;
+    const float facing_y = y - std::cos(spawn.yaw) * 18.0F;
     draw_screen_line(x, y, facing_x, facing_y, width, height);
     core_end();
     glLineWidth(1.0F);
@@ -360,7 +370,8 @@ void draw_player_spawn_2d(
 }
 
 void draw_point_lights_2d(const EditorWorld& editor_world, const int width, const int height, const EditorCamera& camera) {
-    if (width <= 0 || height <= 0 || editor_world.point_lights.empty()) {
+    const std::vector<PointLight> point_lights = point_lights_from_entities(editor_world.entities);
+    if (width <= 0 || height <= 0 || point_lights.empty()) {
         return;
     }
 
@@ -371,7 +382,7 @@ void draw_point_lights_2d(const EditorWorld& editor_world, const int width, cons
     glLineWidth(2.0F);
     core_begin(GL_LINES);
     core_color4f(1.0F, 0.86F, 0.35F, 0.92F);
-    for (const PointLight& light : editor_world.point_lights) {
+    for (const PointLight& light : point_lights) {
         if (std::abs(light.position.y - editor_world.slice_z) > visible_band) {
             continue;
         }
