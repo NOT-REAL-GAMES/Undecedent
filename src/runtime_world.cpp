@@ -4,10 +4,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <set>
 
 namespace undecedent {
 namespace {
+
+constexpr long long kMaxSpatialCellsPerPrimitive = 4096;
+constexpr long long kMaxSpatialQueryCells = 4096;
 
 void normalize_materials(SectorPlane& sector) {
     sector.floor_material = clamped_material_id(sector.floor_material);
@@ -84,11 +88,47 @@ void insert_unique(std::vector<int>& values, const int value) {
     }
 }
 
+long long cell_span_count(const int min_x, const int max_x, const int min_y, const int max_y) {
+    if (max_x < min_x || max_y < min_y) {
+        return 0;
+    }
+    const long long width = static_cast<long long>(max_x) - static_cast<long long>(min_x) + 1LL;
+    const long long height = static_cast<long long>(max_y) - static_cast<long long>(min_y) + 1LL;
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+    if (width > (std::numeric_limits<long long>::max() / height)) {
+        return std::numeric_limits<long long>::max();
+    }
+    return width * height;
+}
+
+bool bounds_cell_range(
+    const RuntimeWorld& world,
+    const RuntimeBounds2 bounds,
+    int& min_x,
+    int& max_x,
+    int& min_y,
+    int& max_y,
+    long long& cell_count
+) {
+    min_x = cell_coord(bounds.min_x, world.cell_size);
+    max_x = cell_coord(bounds.max_x, world.cell_size);
+    min_y = cell_coord(bounds.min_y, world.cell_size);
+    max_y = cell_coord(bounds.max_y, world.cell_size);
+    cell_count = cell_span_count(min_x, max_x, min_y, max_y);
+    return cell_count > 0;
+}
+
 void insert_sector_cells(RuntimeWorld& world, const int sector_id, const RuntimeBounds2 bounds) {
     const int min_x = cell_coord(bounds.min_x, world.cell_size);
     const int max_x = cell_coord(bounds.max_x, world.cell_size);
     const int min_y = cell_coord(bounds.min_y, world.cell_size);
     const int max_y = cell_coord(bounds.max_y, world.cell_size);
+    if (cell_span_count(min_x, max_x, min_y, max_y) > kMaxSpatialCellsPerPrimitive) {
+        insert_unique(world.unindexed_sector_ids, sector_id);
+        return;
+    }
 
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
@@ -102,6 +142,10 @@ void insert_wall_cells(RuntimeWorld& world, const int wall_id, const RuntimeBoun
     const int max_x = cell_coord(bounds.max_x, world.cell_size);
     const int min_y = cell_coord(bounds.min_y, world.cell_size);
     const int max_y = cell_coord(bounds.max_y, world.cell_size);
+    if (cell_span_count(min_x, max_x, min_y, max_y) > kMaxSpatialCellsPerPrimitive) {
+        insert_unique(world.unindexed_wall_ids, wall_id);
+        return;
+    }
 
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
@@ -147,6 +191,15 @@ bool point_in_loop_or_on(const PolygonLoop& loop, const Vec2 point) {
     return inside;
 }
 
+bool point_on_loop(const PolygonLoop& loop, const Vec2 point) {
+    for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+        if (point_on_segment(loop.vertices[i], loop.vertices[(i + 1) % loop.vertices.size()], point)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool point_in_sector(const RuntimeSector& sector, const Vec2 point) {
     if (point.x < sector.bounds.min_x || point.x > sector.bounds.max_x ||
         point.y < sector.bounds.min_y || point.y > sector.bounds.max_y) {
@@ -157,6 +210,19 @@ bool point_in_sector(const RuntimeSector& sector, const Vec2 point) {
         return false;
     }
 
+    return std::none_of(sector.holes.begin(), sector.holes.end(), [point](const PolygonLoop& hole) {
+        return point_in_loop_or_on(hole, point);
+    });
+}
+
+bool point_in_sector_strict(const RuntimeSector& sector, const Vec2 point) {
+    if (point.x <= sector.bounds.min_x + 0.001F || point.x >= sector.bounds.max_x - 0.001F ||
+        point.y <= sector.bounds.min_y + 0.001F || point.y >= sector.bounds.max_y - 0.001F) {
+        return false;
+    }
+    if (point_on_loop(sector.outer, point) || !point_in_loop_or_on(sector.outer, point)) {
+        return false;
+    }
     return std::none_of(sector.holes.begin(), sector.holes.end(), [point](const PolygonLoop& hole) {
         return point_in_loop_or_on(hole, point);
     });
@@ -178,6 +244,55 @@ bool vertical_ranges_overlap(const float floor_a, const float height_a, const fl
     const float lower = std::max(floor_a, floor_b);
     const float upper = std::min(floor_a + height_a, floor_b + height_b);
     return upper > lower + 0.001F;
+}
+
+bool vertical_ranges_overlap(const RuntimeSector& a, const RuntimeSector& b) {
+    const float lower = std::max(a.min_floor_height, b.min_floor_height);
+    const float upper = std::min(a.max_ceiling_height, b.max_ceiling_height);
+    return upper > lower + 0.001F;
+}
+
+bool bounds_overlap(const RuntimeBounds2 a, const RuntimeBounds2 b) {
+    return a.max_x >= b.min_x - 0.001F &&
+        b.max_x >= a.min_x - 0.001F &&
+        a.max_y >= b.min_y - 0.001F &&
+        b.max_y >= a.min_y - 0.001F;
+}
+
+float loop_area_abs(const PolygonLoop& loop) {
+    if (loop.vertices.size() < 3) {
+        return 0.0F;
+    }
+
+    float area = 0.0F;
+    for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+        const Vec2 a = loop.vertices[i];
+        const Vec2 b = loop.vertices[(i + 1) % loop.vertices.size()];
+        area += (a.x * b.y) - (b.x * a.y);
+    }
+    return std::abs(area) * 0.5F;
+}
+
+float sector_area(const RuntimeSector& sector) {
+    float area = loop_area_abs(sector.outer);
+    for (const PolygonLoop& hole : sector.holes) {
+        area -= loop_area_abs(hole);
+    }
+    return std::max(area, 0.0F);
+}
+
+bool sectors_overlap_for_visibility(const RuntimeSector& a, const RuntimeSector& b) {
+    if (!bounds_overlap(a.bounds, b.bounds) || !vertical_ranges_overlap(a, b)) {
+        return false;
+    }
+
+    if (!a.outer.vertices.empty() && point_in_sector_strict(b, a.outer.vertices.front())) {
+        return true;
+    }
+    if (!b.outer.vertices.empty() && point_in_sector_strict(a, b.outer.vertices.front())) {
+        return true;
+    }
+    return false;
 }
 
 void add_portal_record(
@@ -356,10 +471,23 @@ std::vector<int> unique_sorted(std::vector<int> values) {
 
 std::vector<int> ids_in_bounds(const RuntimeWorld& world, const RuntimeBounds2 bounds, const bool walls) {
     std::vector<int> ids;
-    const int min_x = cell_coord(bounds.min_x, world.cell_size);
-    const int max_x = cell_coord(bounds.max_x, world.cell_size);
-    const int min_y = cell_coord(bounds.min_y, world.cell_size);
-    const int max_y = cell_coord(bounds.max_y, world.cell_size);
+    int min_x = 0;
+    int max_x = 0;
+    int min_y = 0;
+    int max_y = 0;
+    long long cell_count = 0;
+    if (!bounds_cell_range(world, bounds, min_x, max_x, min_y, max_y, cell_count)) {
+        return {};
+    }
+
+    if (cell_count > kMaxSpatialQueryCells) {
+        ids.reserve(walls ? world.walls.size() : world.sectors.size());
+        const std::size_t count = walls ? world.walls.size() : world.sectors.size();
+        for (std::size_t id = 0; id < count; ++id) {
+            ids.push_back(static_cast<int>(id));
+        }
+        return ids;
+    }
 
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
@@ -372,6 +500,8 @@ std::vector<int> ids_in_bounds(const RuntimeWorld& world, const RuntimeBounds2 b
             ids.insert(ids.end(), source.begin(), source.end());
         }
     }
+    const std::vector<int>& unindexed = walls ? world.unindexed_wall_ids : world.unindexed_sector_ids;
+    ids.insert(ids.end(), unindexed.begin(), unindexed.end());
     return unique_sorted(std::move(ids));
 }
 
@@ -541,6 +671,16 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
         }
     }
 
+    for (std::size_t a = 0; a < world.sectors.size(); ++a) {
+        for (std::size_t b = a + 1; b < world.sectors.size(); ++b) {
+            if (!sectors_overlap_for_visibility(world.sectors[a], world.sectors[b])) {
+                continue;
+            }
+            insert_unique(world.sectors[a].overlap_visibility_ids, static_cast<int>(b));
+            insert_unique(world.sectors[b].overlap_visibility_ids, static_cast<int>(a));
+        }
+    }
+
     return world;
 }
 
@@ -578,22 +718,41 @@ float runtime_ceiling_height_at(const RuntimeSector& sector, const Vec2 point) {
 
 int sector_at_point(const RuntimeWorld& world, const Vec3 point) {
     const Vec2 point_2d{point.x, point.z};
+    int best_sector = -1;
+    float best_area = 0.0F;
+    const auto consider = [&](const int sector_id) {
+        if (sector_id < 0 || sector_id >= static_cast<int>(world.sectors.size())) {
+            return;
+        }
+        const RuntimeSector& sector = world.sectors[static_cast<std::size_t>(sector_id)];
+        if (!point_in_sector_volume(sector, point)) {
+            return;
+        }
+        const float area = sector_area(sector);
+        if (best_sector < 0 || area < best_area) {
+            best_sector = sector_id;
+            best_area = area;
+        }
+    };
+
     const auto found = world.spatial_cells.find({cell_coord(point_2d.x, world.cell_size), cell_coord(point_2d.y, world.cell_size)});
     if (found != world.spatial_cells.end()) {
         for (const int sector_id : found->second.sector_ids) {
-            if (sector_id >= 0 && sector_id < static_cast<int>(world.sectors.size()) &&
-                point_in_sector_volume(world.sectors[static_cast<std::size_t>(sector_id)], point)) {
-                return sector_id;
-            }
+            consider(sector_id);
         }
     }
 
-    for (std::size_t sector_id = 0; sector_id < world.sectors.size(); ++sector_id) {
-        if (point_in_sector_volume(world.sectors[sector_id], point)) {
-            return static_cast<int>(sector_id);
-        }
+    for (const int sector_id : world.unindexed_sector_ids) {
+        consider(sector_id);
     }
-    return -1;
+    if (best_sector >= 0) {
+        return best_sector;
+    }
+
+    for (std::size_t sector_id = 0; sector_id < world.sectors.size(); ++sector_id) {
+        consider(static_cast<int>(sector_id));
+    }
+    return best_sector;
 }
 
 std::vector<int> visible_sectors_from(const RuntimeWorld& world, const int sector_id) {
@@ -609,6 +768,13 @@ std::vector<int> visible_sectors_from(const RuntimeWorld& world, const int secto
         stack.pop_back();
 
         for (const int neighbor : world.sectors[static_cast<std::size_t>(current)].neighbors) {
+            if (neighbor < 0 || neighbor >= static_cast<int>(world.sectors.size()) || visited.contains(neighbor)) {
+                continue;
+            }
+            visited.insert(neighbor);
+            stack.push_back(neighbor);
+        }
+        for (const int neighbor : world.sectors[static_cast<std::size_t>(current)].overlap_visibility_ids) {
             if (neighbor < 0 || neighbor >= static_cast<int>(world.sectors.size()) || visited.contains(neighbor)) {
                 continue;
             }

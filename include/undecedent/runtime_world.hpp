@@ -53,6 +53,7 @@ struct RuntimeSector {
     RuntimeBounds2 bounds;
     std::vector<int> neighbors;
     std::vector<int> portal_ids;
+    std::vector<int> overlap_visibility_ids;
     float floor_height = 0.0F;
     float height = 96.0F;
     float min_floor_height = 0.0F;
@@ -75,6 +76,8 @@ struct RuntimeWorld {
     std::vector<RuntimeWallSegment> walls;
     std::vector<RuntimePortal> portals;
     std::map<std::pair<int, int>, RuntimeSpatialCell> spatial_cells;
+    std::vector<int> unindexed_sector_ids;
+    std::vector<int> unindexed_wall_ids;
 };
 
 RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, float cell_size = 128.0F);

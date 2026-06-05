@@ -984,9 +984,14 @@ void update_snapped_mouse(
     editor_world.snapped_mouse = snap_to_grid(world, editor_grid_world_step(camera.zoom));
 }
 
-void rebuild_runtime_geometry(EditorWorld& editor_world) {
+void rebuild_runtime_geometry(EditorWorld& editor_world, const bool shadow_geometry_changed) {
     editor_world.runtime_world = build_runtime_world(editor_world.sectors);
     rebuild_runtime_render_cache(editor_world.runtime_render_cache, editor_world.runtime_world);
+    if (shadow_geometry_changed) {
+        editor_world.runtime_render_cache.shadow_revision = ++editor_world.shadow_revision_counter;
+    } else {
+        editor_world.runtime_render_cache.shadow_revision = editor_world.shadow_revision_counter;
+    }
 }
 
 MapDirtyState editor_map_dirty_state(const EditorWorld& editor_world) {
@@ -1292,7 +1297,7 @@ bool apply_material_to_surface(EditorWorld& editor_world, const SurfacePick& pic
         break;
     }
 
-    rebuild_runtime_geometry(editor_world);
+    rebuild_runtime_geometry(editor_world, false);
     mark_sector_dirty(editor_world, static_cast<std::size_t>(pick.sector_id));
     return true;
 }

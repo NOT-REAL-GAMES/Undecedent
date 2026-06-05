@@ -17,7 +17,13 @@ struct GameRenderConfig {
     float player_eye_height = 48.0F;
     float player_height = 56.0F;
     float player_radius = 8.0F;
+    bool vsm_shadows_enabled = true;
+    bool csm_shadows_enabled = true;
     bool screen_space_shadows_enabled = true;
+    bool fog_enabled = true;
+    float fog_start = 524288.0F;
+    float fog_end = 1048576.0F;
+    Vec3 fog_color{0.005F, 0.028F, 0.022F};
 };
 
 void set_game_projection(int width, int height, const GameCamera& camera, const GameRenderConfig& config);

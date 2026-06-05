@@ -23,7 +23,7 @@ bool configure_gl_attributes() {
     bool ok = true;
     ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4) && ok;
     ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3) && ok;
-    ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY) && ok;
+    ok = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE) && ok;
     ok = SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1) && ok;
     ok = SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24) && ok;
     return ok;

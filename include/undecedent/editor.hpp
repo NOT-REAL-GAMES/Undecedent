@@ -8,6 +8,7 @@
 #include "undecedent/runtime_world.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <set>
 #include <string>
 #include <vector>
@@ -134,6 +135,7 @@ struct EditorWorld {
     float slice_z = 0.0F;
     float slice_scroll_remainder = 0.0F;
     float entity_drag_start_axis_t = 0.0F;
+    std::uint64_t shadow_revision_counter = 1;
     int dragged_draft_vertex = -1;
     int selected_sector = -1;
     EntityPlacementType entity_placement = EntityPlacementType::PlayerSpawn;
@@ -276,7 +278,7 @@ void update_snapped_mouse(
     float mouse_y
 );
 
-void rebuild_runtime_geometry(EditorWorld& editor_world);
+void rebuild_runtime_geometry(EditorWorld& editor_world, bool shadow_geometry_changed = true);
 MapDirtyState editor_map_dirty_state(const EditorWorld& editor_world);
 void clear_map_dirty_state(EditorWorld& editor_world);
 void mark_sector_dirty(EditorWorld& editor_world, std::size_t sector_index);

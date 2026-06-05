@@ -29,6 +29,7 @@ struct CameraBasis {
 struct PortalVisit {
     int sector_id = -1;
     ClipRect clip;
+    bool traverse = true;
 };
 
 float dot(const Vec3 a, const Vec3 b) {
@@ -179,6 +180,39 @@ bool project_portal_rect(
     return intersect_rects(screen, expanded_rect(projected, kPortalClipPadding), out);
 }
 
+float loop_area(const PolygonLoop& loop) {
+    if (loop.vertices.size() < 3) {
+        return 0.0F;
+    }
+
+    float area = 0.0F;
+    for (std::size_t i = 0; i < loop.vertices.size(); ++i) {
+        const Vec2 a = loop.vertices[i];
+        const Vec2 b = loop.vertices[(i + 1) % loop.vertices.size()];
+        area += (a.x * b.y) - (b.x * a.y);
+    }
+    return std::abs(area) * 0.5F;
+}
+
+float sector_area(const RuntimeSector& sector) {
+    float area = loop_area(sector.outer);
+    for (const PolygonLoop& hole : sector.holes) {
+        area -= loop_area(hole);
+    }
+    return std::max(area, 0.0F);
+}
+
+bool should_visit_overlap_sector(const RuntimeWorld& world, const int from_sector, const int to_sector) {
+    if (from_sector < 0 || from_sector >= static_cast<int>(world.sectors.size()) ||
+        to_sector < 0 || to_sector >= static_cast<int>(world.sectors.size())) {
+        return false;
+    }
+
+    const RuntimeSector& from = world.sectors[static_cast<std::size_t>(from_sector)];
+    const RuntimeSector& to = world.sectors[static_cast<std::size_t>(to_sector)];
+    return sector_area(to) < sector_area(from) - 0.001F;
+}
+
 } // namespace
 
 std::vector<int> visible_sectors_from_camera(
@@ -219,6 +253,25 @@ std::vector<int> visible_sectors_from_camera(
         }
 
         const RuntimeSector& sector = world.sectors[static_cast<std::size_t>(visit.sector_id)];
+        if (!visit.traverse) {
+            continue;
+        }
+
+        for (const int overlap_sector : sector.overlap_visibility_ids) {
+            if (!should_visit_overlap_sector(world, visit.sector_id, overlap_sector)) {
+                continue;
+            }
+
+            const std::size_t to_index = static_cast<std::size_t>(overlap_sector);
+            if (has_best_clip[to_index] && rect_contains(best_clip[to_index], visit.clip)) {
+                continue;
+            }
+
+            best_clip[to_index] = has_best_clip[to_index] ? union_rects(best_clip[to_index], visit.clip) : visit.clip;
+            has_best_clip[to_index] = 1;
+            stack.push_back(PortalVisit{overlap_sector, visit.clip, false});
+        }
+
         for (const int portal_id : sector.portal_ids) {
             if (portal_id < 0 || portal_id >= static_cast<int>(world.portals.size())) {
                 continue;
@@ -246,7 +299,7 @@ std::vector<int> visible_sectors_from_camera(
 
             best_clip[to_index] = has_best_clip[to_index] ? union_rects(best_clip[to_index], next_clip) : next_clip;
             has_best_clip[to_index] = 1;
-            stack.push_back(PortalVisit{portal.to_sector, next_clip});
+            stack.push_back(PortalVisit{portal.to_sector, next_clip, true});
         }
     }
 

@@ -2,6 +2,7 @@
 
 #include "undecedent/shadow_atlas.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <iomanip>
 #include <iostream>
@@ -126,9 +127,15 @@ void cache_deferred_uniforms(DeferredRenderer& renderer) {
     renderer.lighting_uniforms.sun_direction = glGetUniformLocation(lighting, "uSunDirection");
     renderer.lighting_uniforms.sun_color = glGetUniformLocation(lighting, "uSunColor");
     renderer.lighting_uniforms.sun_intensity = glGetUniformLocation(lighting, "uSunIntensity");
-    renderer.lighting_uniforms.sun_shadow_matrix = glGetUniformLocation(lighting, "uSunShadowMatrix");
+    renderer.lighting_uniforms.camera_forward = glGetUniformLocation(lighting, "uCameraForward");
+    renderer.lighting_uniforms.sun_shadow_matrices = glGetUniformLocation(lighting, "uSunShadowMatrices[0]");
+    renderer.lighting_uniforms.sun_shadow_rects = glGetUniformLocation(lighting, "uSunShadowRects[0]");
+    renderer.lighting_uniforms.sun_cascade_splits = glGetUniformLocation(lighting, "uSunCascadeSplits");
     renderer.lighting_uniforms.screen_space_shadows_enabled =
         glGetUniformLocation(lighting, "uScreenSpaceShadowsEnabled");
+    renderer.lighting_uniforms.fog_enabled = glGetUniformLocation(lighting, "uFogEnabled");
+    renderer.lighting_uniforms.fog_start_end = glGetUniformLocation(lighting, "uFogStartEnd");
+    renderer.lighting_uniforms.fog_color = glGetUniformLocation(lighting, "uFogColor");
 
     if (renderer.screen_shadow_program != 0) {
         renderer.screen_shadow_uniforms.position =
@@ -165,47 +172,53 @@ void cache_deferred_uniforms(DeferredRenderer& renderer) {
 
 bool create_deferred_programs(DeferredRenderer& renderer) {
     static constexpr const char* geometry_vertex = R"(
-#version 120
-attribute vec3 aPosition;
-attribute vec3 aColor;
-attribute vec3 aNormal;
-attribute vec3 aMaterial;
-varying vec3 vWorldPosition;
-varying vec3 vNormal;
-varying vec3 vAlbedo;
-varying vec3 vMaterial;
+#version 430 core
+layout(location = 0) in vec3 aPosition;
+layout(location = 1) in vec3 aColor;
+layout(location = 2) in vec3 aNormal;
+layout(location = 3) in vec3 aMaterial;
+uniform mat4 uViewProjection;
+out vec3 vWorldPosition;
+out vec3 vNormal;
+out vec3 vAlbedo;
+out vec3 vMaterial;
 void main() {
     vWorldPosition = aPosition;
     vNormal = normalize(aNormal);
     vAlbedo = aColor;
     vMaterial = aMaterial;
-    gl_Position = gl_ModelViewProjectionMatrix * vec4(aPosition, 1.0);
+    gl_Position = uViewProjection * vec4(aPosition, 1.0);
 }
 )";
 
     static constexpr const char* geometry_fragment = R"(
-#version 120
-varying vec3 vWorldPosition;
-varying vec3 vNormal;
-varying vec3 vAlbedo;
-varying vec3 vMaterial;
+#version 430 core
+in vec3 vWorldPosition;
+in vec3 vNormal;
+in vec3 vAlbedo;
+in vec3 vMaterial;
+layout(location = 0) out vec4 oPosition;
+layout(location = 1) out vec4 oNormal;
+layout(location = 2) out vec4 oAlbedo;
+layout(location = 3) out vec4 oMaterial;
 void main() {
-    gl_FragData[0] = vec4(vWorldPosition, 1.0);
-    gl_FragData[1] = vec4((normalize(vNormal) * 0.5) + 0.5, 1.0);
-    gl_FragData[2] = vec4(vAlbedo, 1.0);
-    gl_FragData[3] = vec4(vMaterial, 1.0);
+    oPosition = vec4(vWorldPosition, 1.0);
+    oNormal = vec4((normalize(vNormal) * 0.5) + 0.5, 1.0);
+    oAlbedo = vec4(vAlbedo, 1.0);
+    oMaterial = vec4(vMaterial, 1.0);
 }
 )";
 
     static constexpr const char* lighting_vertex = R"(
-#version 430 compatibility
+#version 430 core
+layout(location = 0) in vec3 aPosition;
 void main() {
-    gl_Position = gl_Vertex;
+    gl_Position = vec4(aPosition, 1.0);
 }
 )";
 
     static constexpr const char* lighting_fragment = R"(
-#version 430 compatibility
+#version 430 core
 uniform sampler2D uPosition;
 uniform sampler2D uNormal;
 uniform sampler2D uAlbedo;
@@ -223,8 +236,15 @@ uniform bool uSunShadowEnabled;
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform float uSunIntensity;
-uniform mat4 uSunShadowMatrix;
+uniform vec3 uCameraForward;
+uniform mat4 uSunShadowMatrices[4];
+uniform vec4 uSunShadowRects[4];
+uniform vec4 uSunCascadeSplits;
 uniform bool uScreenSpaceShadowsEnabled;
+uniform bool uFogEnabled;
+uniform vec2 uFogStartEnd;
+uniform vec3 uFogColor;
+layout(location = 0) out vec4 oColor;
 const int MAX_POINT_LIGHTS = 4096;
 const int POINT_SHADOW_FACE_COUNT = 6;
 struct PointLightRecord {
@@ -252,6 +272,7 @@ const float EVSM_HARD_OCCLUDER_END = 0.0012;
 const float EVSM_MIN_VARIANCE = 0.000002;
 const float EVSM_BLEED_REDUCTION = 0.68;
 const float POINT_SHADOW_ATLAS_TEXEL = 0.0001220703125;
+const float SUN_SHADOW_ATLAS_TEXEL = 0.000244140625;
 const float SUN_SHADOW_DEPTH_BIAS = 0.004;
 float evsm_depth(float depth) {
     return exp(EVSM_EXPONENT * (clamp(depth, 0.0, 1.0) - 1.0));
@@ -307,19 +328,53 @@ float point_shadow_visibility(int light_index, vec3 light_vector, float light_di
     vec2 moments = texture(uPointShadowAtlas, atlas_uv).rg;
     return evsm_visibility(moments, receiver_depth, depth_bias);
 }
-float sun_shadow_visibility(vec3 world_position) {
-    if (!uSunEnabled || !uSunShadowEnabled) {
-        return 1.0;
-    }
-    vec4 clip = uSunShadowMatrix * vec4(world_position, 1.0);
+float sun_shadow_cascade_visibility(int cascade_index, vec3 world_position) {
+    vec4 clip = uSunShadowMatrices[cascade_index] * vec4(world_position, 1.0);
     vec3 projected = (clip.xyz / clip.w) * 0.5 + 0.5;
     if (projected.x < 0.0 || projected.x > 1.0 ||
         projected.y < 0.0 || projected.y > 1.0 ||
         projected.z < 0.0 || projected.z > 1.0) {
         return 1.0;
     }
-    vec2 moments = texture(uSunShadowMoments, projected.xy).rg;
+    vec4 rect = uSunShadowRects[cascade_index];
+    vec2 atlas_span = max(rect.zw - vec2(SUN_SHADOW_ATLAS_TEXEL * 2.0), vec2(0.0));
+    vec2 atlas_uv = rect.xy + vec2(SUN_SHADOW_ATLAS_TEXEL) + (projected.xy * atlas_span);
+    vec2 moments = texture(uSunShadowMoments, atlas_uv).rg;
     return evsm_visibility(moments, projected.z, SUN_SHADOW_DEPTH_BIAS);
+}
+float sun_shadow_visibility(vec3 world_position, float camera_forward_distance) {
+    if (!uSunEnabled || !uSunShadowEnabled) {
+        return 1.0;
+    }
+    float distance = max(camera_forward_distance, 0.0);
+    if (distance > uSunCascadeSplits.w) {
+        return 1.0;
+    }
+    int cascade_index = 0;
+    float cascade_start = 0.0;
+    float cascade_end = uSunCascadeSplits.x;
+    if (distance > uSunCascadeSplits.z) {
+        cascade_index = 3;
+        cascade_start = uSunCascadeSplits.z;
+        cascade_end = uSunCascadeSplits.w;
+    } else if (distance > uSunCascadeSplits.y) {
+        cascade_index = 2;
+        cascade_start = uSunCascadeSplits.y;
+        cascade_end = uSunCascadeSplits.z;
+    } else if (distance > uSunCascadeSplits.x) {
+        cascade_index = 1;
+        cascade_start = uSunCascadeSplits.x;
+        cascade_end = uSunCascadeSplits.y;
+    }
+    float visibility = sun_shadow_cascade_visibility(cascade_index, world_position);
+    float fade_width = max((cascade_end - cascade_start) * 0.08, 128.0);
+    float fade = smoothstep(cascade_end - fade_width, cascade_end, distance);
+    if (cascade_index < 3 && fade > 0.0) {
+        visibility = mix(visibility, sun_shadow_cascade_visibility(cascade_index + 1, world_position), fade);
+    } else if (cascade_index == 3) {
+        visibility = mix(visibility, 1.0, fade);
+    }
+    return visibility;
 }
 float diffuse_shadow_visibility(float shadow) {
     return smoothstep(0.65, 1.0, shadow);
@@ -352,12 +407,12 @@ vec3 fresnel_schlick(float hdotl, vec3 f0) {
 }
 void main() {
     vec2 uv = gl_FragCoord.xy * uInvViewport;
-    vec3 world_position = texture2D(uPosition, uv).xyz;
-    vec3 encoded_normal = texture2D(uNormal, uv).xyz;
-    vec3 albedo = texture2D(uAlbedo, uv).xyz;
-    vec3 material = texture2D(uMaterial, uv).xyz;
+    vec3 world_position = texture(uPosition, uv).xyz;
+    vec3 encoded_normal = texture(uNormal, uv).xyz;
+    vec3 albedo = texture(uAlbedo, uv).xyz;
+    vec3 material = texture(uMaterial, uv).xyz;
     if (dot(albedo, albedo) <= 0.000001) {
-        gl_FragColor = vec4(0.02, 0.025, 0.03, 1.0);
+        oColor = vec4(0.02, 0.025, 0.03, 1.0);
         return;
     }
 
@@ -373,6 +428,7 @@ void main() {
     vec3 f0 = mix(vec3(specular * 0.08), albedo, metallic);
     vec3 diffuse_color = albedo * (1.0 - metallic);
     vec3 color = diffuse_color * uAmbientColor;
+    float camera_forward_distance = dot(world_position - uCameraPosition, normalize(uCameraForward));
     if (uSunEnabled && uSunIntensity > 0.0) {
         vec3 sun_dir = normalize(-uSunDirection);
         vec3 sun_half = normalize(sun_dir + view_dir);
@@ -384,9 +440,9 @@ void main() {
         vec3 fresnel = fresnel_schlick(sun_hdotl, f0);
         vec3 specular_lobe = distribution * visibility * fresnel;
         vec3 diffuse_lobe = diffuse_color / PI;
-        float shadow = sun_shadow_visibility(world_position);
+        float shadow = sun_shadow_visibility(world_position, camera_forward_distance);
         if (uScreenSpaceShadowsEnabled) {
-            shadow = min(shadow, texture2D(uScreenShadowMask, uv).r);
+            shadow = min(shadow, texture(uScreenShadowMask, uv).r);
         }
         float diffuse_shadow = diffuse_shadow_visibility(shadow);
         float specular_shadow = specular_shadow_visibility(shadow);
@@ -425,7 +481,12 @@ void main() {
         color += ((diffuse_lobe * diffuse_ndotl) +
             (specular_lobe * specular_ndotl)) * radiance;
     }
-    gl_FragColor = vec4(color, 1.0);
+    if (uFogEnabled) {
+        float fog_distance = length(world_position - uCameraPosition);
+        float fog = smoothstep(uFogStartEnd.x, uFogStartEnd.y, fog_distance);
+        color = mix(color, uFogColor, fog);
+    }
+    oColor = vec4(color, 1.0);
 }
 )";
 
@@ -449,7 +510,7 @@ void main() {
     }
 
     static constexpr const char* screen_shadow_fragment = R"(
-#version 430 compatibility
+#version 430 core
 uniform sampler2D uPosition;
 uniform sampler2D uNormal;
 uniform sampler2D uAlbedo;
@@ -458,6 +519,7 @@ uniform vec3 uCameraPosition;
 uniform vec3 uCameraForward;
 uniform vec3 uSunDirection;
 uniform mat4 uViewProjectionMatrix;
+layout(location = 0) out vec4 oColor;
 const int SCREEN_SHADOW_MIN_STEPS = 8;
 const int SCREEN_SHADOW_MAX_STEPS = 24;
 const float SCREEN_SHADOW_DISTANCE = 112.0;
@@ -497,22 +559,22 @@ float screen_edge_fade(vec2 uv) {
 }
 void main() {
     vec2 uv = gl_FragCoord.xy * uInvViewport;
-    vec3 albedo = texture2D(uAlbedo, uv).xyz;
+    vec3 albedo = texture(uAlbedo, uv).xyz;
     if (dot(albedo, albedo) <= 0.000001) {
-        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+        oColor = vec4(1.0, 1.0, 1.0, 1.0);
         return;
     }
 
-    vec3 world_position = texture2D(uPosition, uv).xyz;
+    vec3 world_position = texture(uPosition, uv).xyz;
     vec3 view_dir = normalize(uCameraPosition - world_position);
-    vec3 normal = normalize((texture2D(uNormal, uv).xyz * 2.0) - 1.0);
+    vec3 normal = normalize((texture(uNormal, uv).xyz * 2.0) - 1.0);
     if (dot(normal, view_dir) < 0.0) {
         normal = -normal;
     }
     vec3 sun_dir = normalize(-uSunDirection);
     float receiver_depth = dot(world_position - uCameraPosition, uCameraForward);
     if (receiver_depth <= SCREEN_SHADOW_MIN_VIEW_DEPTH) {
-        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+        oColor = vec4(1.0, 1.0, 1.0, 1.0);
         return;
     }
 
@@ -542,11 +604,11 @@ void main() {
         if (sample_edge_fade <= 0.0) {
             break;
         }
-        vec3 sample_albedo = texture2D(uAlbedo, sample_uv).xyz;
+        vec3 sample_albedo = texture(uAlbedo, sample_uv).xyz;
         if (dot(sample_albedo, sample_albedo) <= 0.000001) {
             continue;
         }
-        vec3 sample_position = texture2D(uPosition, sample_uv).xyz;
+        vec3 sample_position = texture(uPosition, sample_uv).xyz;
         float ray_depth = dot(ray_position - uCameraPosition, uCameraForward);
         float sample_depth = dot(sample_position - uCameraPosition, uCameraForward);
         if (ray_depth <= SCREEN_SHADOW_MIN_VIEW_DEPTH || sample_depth <= SCREEN_SHADOW_MIN_VIEW_DEPTH) {
@@ -562,12 +624,12 @@ void main() {
             SCREEN_SHADOW_MAX_THICKNESS,
             depth_delta
         );
-        float distance_fade = 1.0 - (fraction * 0.65);
+        float distance_fade = 1.0 - smoothstep(0.72, 1.0, fraction);
         occlusion = max(occlusion, hit * thickness_fade * distance_fade * sample_edge_fade);
     }
 
     float visibility = 1.0 - (occlusion * SCREEN_SHADOW_STRENGTH);
-    gl_FragColor = vec4(saturate(visibility), 1.0, 1.0, 1.0);
+    oColor = vec4(saturate(visibility), 1.0, 1.0, 1.0);
 }
 )";
 
@@ -583,7 +645,7 @@ void main() {
     }
 
     static constexpr const char* shadow_vertex = R"(
-#version 430 compatibility
+#version 430 core
 layout(location = 0) in vec3 aPosition;
 uniform mat4 uLightMatrix;
 out vec3 vWorldPosition;
@@ -594,7 +656,7 @@ void main() {
 )";
 
     static constexpr const char* point_shadow_fragment = R"(
-#version 430 compatibility
+#version 430 core
 in vec3 vWorldPosition;
 uniform vec3 uLightPosition;
 uniform float uLightRadius;
@@ -611,7 +673,7 @@ void main() {
 )";
 
     static constexpr const char* sun_shadow_fragment = R"(
-#version 430 compatibility
+#version 430 core
 layout(location = 0) out vec2 oMoments;
 const float EVSM_EXPONENT = 8.0;
 float evsm_depth(float depth) {
@@ -645,6 +707,7 @@ void main() {
         renderer.point_shadow_program = 0;
         renderer.shadows_disabled = true;
     }
+    renderer.geometry_view_projection = glGetUniformLocation(renderer.geometry_program, "uViewProjection");
     cache_deferred_uniforms(renderer);
     return true;
 }
@@ -678,6 +741,18 @@ void destroy_deferred_renderer(DeferredRenderer& renderer) {
     }
     if (renderer.point_shadow_face_buffer != 0) {
         glDeleteBuffers(1, &renderer.point_shadow_face_buffer);
+    }
+    if (renderer.fullscreen_vbo != 0) {
+        glDeleteBuffers(1, &renderer.fullscreen_vbo);
+    }
+    if (renderer.geometry_vao != 0) {
+        glDeleteVertexArrays(1, &renderer.geometry_vao);
+    }
+    if (renderer.shadow_vao != 0) {
+        glDeleteVertexArrays(1, &renderer.shadow_vao);
+    }
+    if (renderer.fullscreen_vao != 0) {
+        glDeleteVertexArrays(1, &renderer.fullscreen_vao);
     }
     if (renderer.depth_renderbuffer != 0) {
         glDeleteRenderbuffers(1, &renderer.depth_renderbuffer);
@@ -734,6 +809,30 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
         glGenRenderbuffers(1, &renderer.sun_shadow_depth_renderbuffer);
         glGenBuffers(1, &renderer.point_light_buffer);
         glGenBuffers(1, &renderer.point_shadow_face_buffer);
+        glGenVertexArrays(1, &renderer.geometry_vao);
+        glGenVertexArrays(1, &renderer.shadow_vao);
+        glGenVertexArrays(1, &renderer.fullscreen_vao);
+        glGenBuffers(1, &renderer.fullscreen_vbo);
+        if (renderer.fullscreen_vao != 0 && renderer.fullscreen_vbo != 0) {
+            constexpr std::array<float, 12> fullscreen_vertices{
+                -1.0F, -1.0F, 0.0F,
+                1.0F, -1.0F, 0.0F,
+                1.0F, 1.0F, 0.0F,
+                -1.0F, 1.0F, 0.0F,
+            };
+            glBindVertexArray(renderer.fullscreen_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, renderer.fullscreen_vbo);
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                static_cast<GLsizeiptr>(fullscreen_vertices.size() * sizeof(float)),
+                fullscreen_vertices.data(),
+                GL_STATIC_DRAW
+            );
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glBindVertexArray(0);
+        }
         renderer.initialized = true;
     }
 
@@ -741,8 +840,10 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
         renderer.shadows_disabled ||
         (renderer.point_shadow_texture != 0 &&
             renderer.sun_shadow_texture != 0 &&
+            renderer.point_shadow_depth_size == kPointShadowAtlasSize &&
+            renderer.sun_shadow_depth_size == kSunShadowAtlasSize &&
             renderer.point_shadow_atlas_size == kPointShadowAtlasSize &&
-            renderer.sun_shadow_resolution == kSunShadowResolution);
+            renderer.sun_shadow_resolution == kSunShadowAtlasSize);
 
     if (renderer.width == width && renderer.height == height &&
         renderer.position_texture != 0 && renderer.normal_texture != 0 &&
@@ -792,13 +893,14 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
         (renderer.point_shadow_texture == 0 ||
             renderer.sun_shadow_texture == 0 ||
             renderer.point_shadow_atlas_size != kPointShadowAtlasSize ||
-            renderer.sun_shadow_resolution != kSunShadowResolution)) {
+            renderer.sun_shadow_resolution != kSunShadowAtlasSize)) {
         GLint max_texture_size = 0;
         GLint max_renderbuffer_size = 0;
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
         glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_renderbuffer_size);
-        if (max_texture_size < kPointShadowAtlasSize || max_renderbuffer_size < kPointShadowAtlasSize) {
-            std::cerr << "Deferred shadow atlas disabled: requested " << kPointShadowAtlasSize
+        const int required_shadow_size = std::max(kPointShadowAtlasSize, kSunShadowAtlasSize);
+        if (max_texture_size < required_shadow_size || max_renderbuffer_size < required_shadow_size) {
+            std::cerr << "Deferred shadow atlas disabled: requested " << required_shadow_size
                       << " but GL_MAX_TEXTURE_SIZE=" << max_texture_size
                       << " GL_MAX_RENDERBUFFER_SIZE=" << max_renderbuffer_size << ".\n";
             renderer.shadows_disabled = true;
@@ -812,7 +914,9 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
             }
 
             renderer.point_shadow_atlas_size = kPointShadowAtlasSize;
-            renderer.sun_shadow_resolution = kSunShadowResolution;
+            renderer.sun_shadow_resolution = kSunShadowAtlasSize;
+            renderer.point_shadow_cache.clear();
+            renderer.sun_shadow_cache.valid = false;
 
             glGenTextures(1, &renderer.point_shadow_texture);
             glBindTexture(GL_TEXTURE_2D, renderer.point_shadow_texture);
@@ -840,8 +944,8 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
                 GL_TEXTURE_2D,
                 0,
                 GL_RG32F,
-                kSunShadowResolution,
-                kSunShadowResolution,
+                kSunShadowAtlasSize,
+                kSunShadowAtlasSize,
                 0,
                 GL_RG,
                 GL_FLOAT,
@@ -863,6 +967,31 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
             }
         }
     }
+
+    if (!renderer.shadows_disabled && renderer.point_shadow_depth_size != kPointShadowAtlasSize) {
+        glBindRenderbuffer(GL_RENDERBUFFER, renderer.point_shadow_depth_renderbuffer);
+        glRenderbufferStorage(
+            GL_RENDERBUFFER,
+            GL_DEPTH_COMPONENT24,
+            kPointShadowAtlasSize,
+            kPointShadowAtlasSize
+        );
+        renderer.point_shadow_depth_size = kPointShadowAtlasSize;
+        renderer.point_shadow_cache.clear();
+    }
+
+    if (!renderer.shadows_disabled && renderer.sun_shadow_depth_size != kSunShadowAtlasSize) {
+        glBindRenderbuffer(GL_RENDERBUFFER, renderer.sun_shadow_depth_renderbuffer);
+        glRenderbufferStorage(
+            GL_RENDERBUFFER,
+            GL_DEPTH_COMPONENT24,
+            kSunShadowAtlasSize,
+            kSunShadowAtlasSize
+        );
+        renderer.sun_shadow_depth_size = kSunShadowAtlasSize;
+        renderer.sun_shadow_cache.valid = false;
+    }
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
     glBindRenderbuffer(GL_RENDERBUFFER, renderer.depth_renderbuffer);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);

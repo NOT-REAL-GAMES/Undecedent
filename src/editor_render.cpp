@@ -5,6 +5,8 @@
 
 #include <glad/glad.h>
 
+#include "undecedent/core_draw.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -53,7 +55,7 @@ void draw_editor_grid(
     const float min_world_y = screen_to_world_y(0.0F, height, camera);
     const float max_world_y = screen_to_world_y(static_cast<float>(height), height, camera);
 
-    glBegin(GL_LINES);
+    core_begin(GL_LINES);
     const int first_vertical = static_cast<int>(std::floor(min_world_x / grid_step)) - 1;
     const int last_vertical = static_cast<int>(std::floor(max_world_x / grid_step)) + 1;
     for (int index = first_vertical; index <= last_vertical; ++index) {
@@ -63,9 +65,9 @@ void draw_editor_grid(
         const float screen_x = world_to_screen_x(world_x, width, camera);
         const float ndc_x = screen_to_ndc_x(screen_x, width);
 
-        glColor4f(0.18F, 0.78F, 0.68F, alpha);
-        glVertex2f(ndc_x, -1.0F);
-        glVertex2f(ndc_x, 1.0F);
+        core_color4f(0.18F, 0.78F, 0.68F, alpha);
+        core_vertex2f(ndc_x, -1.0F);
+        core_vertex2f(ndc_x, 1.0F);
     }
 
     const int first_horizontal = static_cast<int>(std::floor(min_world_y / grid_step)) - 1;
@@ -77,19 +79,19 @@ void draw_editor_grid(
         const float screen_y = world_to_screen_y(world_y, height, camera);
         const float ndc_y = screen_to_ndc_y(screen_y, height);
 
-        glColor4f(0.18F, 0.78F, 0.68F, alpha);
-        glVertex2f(-1.0F, ndc_y);
-        glVertex2f(1.0F, ndc_y);
+        core_color4f(0.18F, 0.78F, 0.68F, alpha);
+        core_vertex2f(-1.0F, ndc_y);
+        core_vertex2f(1.0F, ndc_y);
     }
 
-    glColor4f(0.90F, 0.96F, 0.76F, 0.55F);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.55F);
     const float origin_x = screen_to_ndc_x(world_to_screen_x(0.0F, width, camera), width);
     const float origin_y = screen_to_ndc_y(world_to_screen_y(0.0F, height, camera), height);
-    glVertex2f(origin_x, -1.0F);
-    glVertex2f(origin_x, 1.0F);
-    glVertex2f(-1.0F, origin_y);
-    glVertex2f(1.0F, origin_y);
-    glEnd();
+    core_vertex2f(origin_x, -1.0F);
+    core_vertex2f(origin_x, 1.0F);
+    core_vertex2f(-1.0F, origin_y);
+    core_vertex2f(1.0F, origin_y);
+    core_end();
 
     glDisable(GL_BLEND);
 }
@@ -108,12 +110,12 @@ void draw_loop_outline(
         return;
     }
 
-    glColor4f(red, green, blue, alpha);
-    glBegin(GL_LINE_LOOP);
+    core_color4f(red, green, blue, alpha);
+    core_begin(GL_LINE_LOOP);
     for (const Vec2 vertex : loop.vertices) {
-        glVertex2f(world_to_ndc_x(vertex.x, width, camera), world_to_ndc_y(vertex.y, height, camera));
+        core_vertex2f(world_to_ndc_x(vertex.x, width, camera), world_to_ndc_y(vertex.y, height, camera));
     }
-    glEnd();
+    core_end();
 }
 
 void draw_vertex_marker(
@@ -128,7 +130,7 @@ void draw_vertex_marker(
 ) {
     const float screen_x = world_to_screen_x(point.x, width, camera);
     const float screen_y = world_to_screen_y(point.y, height, camera);
-    glColor4f(red, green, blue, alpha);
+    core_color4f(red, green, blue, alpha);
     draw_screen_quad(screen_x - 3.0F, screen_y - 3.0F, 6.0F, 6.0F, width, height);
 }
 
@@ -137,25 +139,25 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glBegin(GL_TRIANGLES);
+    core_begin(GL_TRIANGLES);
     for (std::size_t i = 0; i < editor_world.sectors.size(); ++i) {
         if (!sector_visible_in_slice(editor_world, editor_world.sectors[i])) {
             continue;
         }
         const bool selected = is_sector_selected(editor_world, static_cast<int>(i));
         if (selected) {
-            glColor4f(0.36F, 0.78F, 0.68F, 0.28F);
+            core_color4f(0.36F, 0.78F, 0.68F, 0.28F);
         } else {
-            glColor4f(0.22F, 0.58F, 0.68F, 0.20F);
+            core_color4f(0.22F, 0.58F, 0.68F, 0.20F);
         }
 
         for (const Triangle& triangle : editor_world.sectors[i].triangles) {
-            glVertex2f(world_to_ndc_x(triangle.a.x, width, camera), world_to_ndc_y(triangle.a.y, height, camera));
-            glVertex2f(world_to_ndc_x(triangle.b.x, width, camera), world_to_ndc_y(triangle.b.y, height, camera));
-            glVertex2f(world_to_ndc_x(triangle.c.x, width, camera), world_to_ndc_y(triangle.c.y, height, camera));
+            core_vertex2f(world_to_ndc_x(triangle.a.x, width, camera), world_to_ndc_y(triangle.a.y, height, camera));
+            core_vertex2f(world_to_ndc_x(triangle.b.x, width, camera), world_to_ndc_y(triangle.b.y, height, camera));
+            core_vertex2f(world_to_ndc_x(triangle.c.x, width, camera), world_to_ndc_y(triangle.c.y, height, camera));
         }
     }
-    glEnd();
+    core_end();
 
     glLineWidth(2.0F);
     for (std::size_t i = 0; i < editor_world.sectors.size(); ++i) {
@@ -170,8 +172,8 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
         }
     }
 
-    glBegin(GL_LINES);
-    glColor4f(0.30F, 0.62F, 1.0F, 0.78F);
+    core_begin(GL_LINES);
+    core_color4f(0.30F, 0.62F, 1.0F, 0.78F);
     for (const SectorPlane& sector : editor_world.sectors) {
         if (!sector_visible_in_slice(editor_world, sector)) {
             continue;
@@ -183,13 +185,13 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
 
             const Vec2 a = sector.outer.vertices[edge_index];
             const Vec2 b = sector.outer.vertices[(edge_index + 1) % sector.outer.vertices.size()];
-            glVertex2f(world_to_ndc_x(a.x, width, camera), world_to_ndc_y(a.y, height, camera));
-            glVertex2f(world_to_ndc_x(b.x, width, camera), world_to_ndc_y(b.y, height, camera));
+            core_vertex2f(world_to_ndc_x(a.x, width, camera), world_to_ndc_y(a.y, height, camera));
+            core_vertex2f(world_to_ndc_x(b.x, width, camera), world_to_ndc_y(b.y, height, camera));
         }
     }
-    glEnd();
+    core_end();
 
-    glBegin(GL_QUADS);
+    core_begin(kCoreQuads);
     for (std::size_t sector_index = 0; sector_index < editor_world.sectors.size(); ++sector_index) {
         const SectorPlane& sector = editor_world.sectors[sector_index];
         if (!sector_visible_in_slice(editor_world, sector)) {
@@ -212,7 +214,7 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
             }
         }
     }
-    glEnd();
+    core_end();
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -236,43 +238,43 @@ void draw_draft_plane(const EditorWorld& editor_world, const int width, const in
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     if (valid && editor_world.plane_tool == PlaneToolMode::DrawOuter) {
-        glBegin(GL_TRIANGLES);
-        glColor4f(0.90F, 0.96F, 0.76F, 0.14F);
+        core_begin(GL_TRIANGLES);
+        core_color4f(0.90F, 0.96F, 0.76F, 0.14F);
         for (const Triangle& triangle : preview_result.triangles) {
-            glVertex2f(world_to_ndc_x(triangle.a.x, width, camera), world_to_ndc_y(triangle.a.y, height, camera));
-            glVertex2f(world_to_ndc_x(triangle.b.x, width, camera), world_to_ndc_y(triangle.b.y, height, camera));
-            glVertex2f(world_to_ndc_x(triangle.c.x, width, camera), world_to_ndc_y(triangle.c.y, height, camera));
+            core_vertex2f(world_to_ndc_x(triangle.a.x, width, camera), world_to_ndc_y(triangle.a.y, height, camera));
+            core_vertex2f(world_to_ndc_x(triangle.b.x, width, camera), world_to_ndc_y(triangle.b.y, height, camera));
+            core_vertex2f(world_to_ndc_x(triangle.c.x, width, camera), world_to_ndc_y(triangle.c.y, height, camera));
         }
-        glEnd();
+        core_end();
     }
 
     glLineWidth(2.0F);
-    glBegin(GL_LINE_STRIP);
-    glColor4f(red, green, blue, 0.92F);
+    core_begin(GL_LINE_STRIP);
+    core_color4f(red, green, blue, 0.92F);
     for (const Vec2 vertex : editor_world.draft_vertices) {
-        glVertex2f(world_to_ndc_x(vertex.x, width, camera), world_to_ndc_y(vertex.y, height, camera));
+        core_vertex2f(world_to_ndc_x(vertex.x, width, camera), world_to_ndc_y(vertex.y, height, camera));
     }
-    glVertex2f(
+    core_vertex2f(
         world_to_ndc_x(editor_world.snapped_mouse.x, width, camera),
         world_to_ndc_y(editor_world.snapped_mouse.y, height, camera)
     );
-    glEnd();
+    core_end();
 
     if (!knife && editor_world.draft_vertices.size() >= 3) {
-        glBegin(GL_LINES);
-        glColor4f(red, green, blue, 0.42F);
+        core_begin(GL_LINES);
+        core_color4f(red, green, blue, 0.42F);
         const Vec2 first = editor_world.draft_vertices.front();
-        glVertex2f(world_to_ndc_x(editor_world.snapped_mouse.x, width, camera), world_to_ndc_y(editor_world.snapped_mouse.y, height, camera));
-        glVertex2f(world_to_ndc_x(first.x, width, camera), world_to_ndc_y(first.y, height, camera));
-        glEnd();
+        core_vertex2f(world_to_ndc_x(editor_world.snapped_mouse.x, width, camera), world_to_ndc_y(editor_world.snapped_mouse.y, height, camera));
+        core_vertex2f(world_to_ndc_x(first.x, width, camera), world_to_ndc_y(first.y, height, camera));
+        core_end();
     }
 
-    glBegin(GL_QUADS);
+    core_begin(kCoreQuads);
     for (const Vec2 vertex : editor_world.draft_vertices) {
         draw_vertex_marker(vertex, width, height, camera, red, green, blue, 0.95F);
     }
     draw_vertex_marker(editor_world.snapped_mouse, width, height, camera, red, green, blue, 0.55F);
-    glEnd();
+    core_end();
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -300,24 +302,24 @@ void draw_scale_indicator(
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glBegin(GL_QUADS);
-    glColor4f(0.0F, 0.0F, 0.0F, 0.34F);
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, 0.34F);
     draw_screen_quad(10.0F, static_cast<float>(height) - 88.0F, std::max(bar_pixels + 34.0F, 112.0F), 76.0F, width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(2.0F);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, 0.88F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.88F);
     draw_screen_line(origin_x, origin_y, origin_x + bar_pixels, origin_y, width, height);
     draw_screen_line(origin_x, origin_y - 7.0F, origin_x, origin_y + 7.0F, width, height);
     draw_screen_line(origin_x + bar_pixels, origin_y - 7.0F, origin_x + bar_pixels, origin_y + 7.0F, width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(1.0F);
-    glBegin(GL_LINES);
+    core_begin(GL_LINES);
     draw_stroke_text(label, origin_x, label_y, 7.0F, width, height);
     draw_stroke_text(z_label, origin_x, label_y - 18.0F, 7.0F, width, height);
-    glEnd();
+    core_end();
 
     glDisable(GL_BLEND);
 }
@@ -344,15 +346,15 @@ void draw_player_spawn_2d(
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(1.0F, 0.82F, 0.25F, 0.95F);
+    core_color4f(1.0F, 0.82F, 0.25F, 0.95F);
     glLineWidth(2.0F);
-    glBegin(GL_LINES);
+    core_begin(GL_LINES);
     draw_screen_line(x - 10.0F, y, x + 10.0F, y, width, height);
     draw_screen_line(x, y - 10.0F, x, y + 10.0F, width, height);
     const float facing_x = x - std::sin(editor_world.player_spawn.yaw) * 18.0F;
     const float facing_y = y - std::cos(editor_world.player_spawn.yaw) * 18.0F;
     draw_screen_line(x, y, facing_x, facing_y, width, height);
-    glEnd();
+    core_end();
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }
@@ -367,8 +369,8 @@ void draw_point_lights_2d(const EditorWorld& editor_world, const int width, cons
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glLineWidth(2.0F);
-    glBegin(GL_LINES);
-    glColor4f(1.0F, 0.86F, 0.35F, 0.92F);
+    core_begin(GL_LINES);
+    core_color4f(1.0F, 0.86F, 0.35F, 0.92F);
     for (const PointLight& light : editor_world.point_lights) {
         if (std::abs(light.position.y - editor_world.slice_z) > visible_band) {
             continue;
@@ -380,7 +382,7 @@ void draw_point_lights_2d(const EditorWorld& editor_world, const int width, cons
         draw_screen_line(x - 5.0F, y - 5.0F, x + 5.0F, y + 5.0F, width, height);
         draw_screen_line(x - 5.0F, y + 5.0F, x + 5.0F, y - 5.0F, width, height);
     }
-    glEnd();
+    core_end();
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }

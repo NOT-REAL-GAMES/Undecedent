@@ -5,6 +5,7 @@
 
 #include <glad/glad.h>
 
+#include <cstdint>
 #include <vector>
 
 namespace undecedent {
@@ -32,6 +33,7 @@ struct RuntimeRenderRange {
 struct RuntimeRenderCache {
     GLuint vertex_buffer = 0;
     GLsizei total_vertices = 0;
+    std::uint64_t shadow_revision = 1;
     std::vector<RuntimeRenderRange> sector_ranges;
 };
 

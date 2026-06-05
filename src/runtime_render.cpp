@@ -1,7 +1,9 @@
 #include "undecedent/runtime_render.hpp"
 
+#include "undecedent/core_draw.hpp"
 #include "undecedent/runtime_visibility.hpp"
 #include "undecedent/shadow_atlas.hpp"
+#include "undecedent/shadow_cache.hpp"
 
 #include <glad/glad.h>
 
@@ -11,6 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -20,6 +23,40 @@ namespace {
 struct Mat4 {
     std::array<float, 16> m{};
 };
+
+struct SunShadowCascade {
+    Mat4 matrix{};
+    std::array<float, 4> rect{};
+    float split_distance = 0.0F;
+};
+
+using SunShadowCascades = std::array<SunShadowCascade, kSunShadowCascadeCount>;
+
+std::array<std::array<float, 16>, kSunShadowCascadeCount> sun_cascade_matrices(
+    const SunShadowCascades& cascades
+) {
+    std::array<std::array<float, 16>, kSunShadowCascadeCount> matrices{};
+    for (std::size_t i = 0; i < cascades.size(); ++i) {
+        matrices[i] = cascades[i].matrix.m;
+    }
+    return matrices;
+}
+
+void cache_sun_cascades(DeferredRenderer& renderer, const SunShadowCascades& cascades) {
+    for (std::size_t i = 0; i < cascades.size(); ++i) {
+        renderer.cached_sun_shadow_matrices[i] = cascades[i].matrix.m;
+        renderer.cached_sun_shadow_rects[i] = cascades[i].rect;
+        renderer.cached_sun_shadow_splits[i] = cascades[i].split_distance;
+    }
+}
+
+void restore_cached_sun_cascades(DeferredRenderer& renderer, SunShadowCascades& cascades) {
+    for (std::size_t i = 0; i < cascades.size(); ++i) {
+        cascades[i].matrix.m = renderer.cached_sun_shadow_matrices[i];
+        cascades[i].rect = renderer.cached_sun_shadow_rects[i];
+        cascades[i].split_distance = renderer.cached_sun_shadow_splits[i];
+    }
+}
 
 float dot3(const Vec3 a, const Vec3 b) {
     return (a.x * b.x) + (a.y * b.y) + (a.z * b.z);
@@ -51,6 +88,15 @@ Vec3 normalize3(const Vec3 value, const Vec3 fallback = Vec3{0.0F, 1.0F, 0.0F}) 
         return fallback;
     }
     return Vec3{value.x / length, value.y / length, value.z / length};
+}
+
+std::array<float, 4> transform_point(const Mat4& matrix, const Vec3 point) {
+    return {
+        (matrix.m[0] * point.x) + (matrix.m[4] * point.y) + (matrix.m[8] * point.z) + matrix.m[12],
+        (matrix.m[1] * point.x) + (matrix.m[5] * point.y) + (matrix.m[9] * point.z) + matrix.m[13],
+        (matrix.m[2] * point.x) + (matrix.m[6] * point.y) + (matrix.m[10] * point.z) + matrix.m[14],
+        (matrix.m[3] * point.x) + (matrix.m[7] * point.y) + (matrix.m[11] * point.z) + matrix.m[15],
+    };
 }
 
 Mat4 multiply(const Mat4& a, const Mat4& b) {
@@ -169,6 +215,17 @@ Vec3 camera_forward(const GameCamera& camera) {
     );
 }
 
+Vec3 camera_right(const GameCamera& camera) {
+    return normalize3(
+        Vec3{std::cos(camera.yaw), 0.0F, -std::sin(camera.yaw)},
+        Vec3{1.0F, 0.0F, 0.0F}
+    );
+}
+
+Vec3 camera_up(const GameCamera& camera) {
+    return normalize3(cross3(camera_right(camera), camera_forward(camera)), Vec3{0.0F, 1.0F, 0.0F});
+}
+
 Mat4 game_view_projection_matrix(
     const int width,
     const int height,
@@ -199,15 +256,122 @@ std::array<Mat4, 6> point_shadow_matrices(const PointLight& light) {
     }};
 }
 
-Mat4 sun_shadow_matrix(const WorldLighting& lighting, const GameCamera& camera) {
+std::array<Vec3, 8> frustum_slice_corners(
+    const GameCamera& camera,
+    const GameRenderConfig& config,
+    const int width,
+    const int height,
+    const float near_distance,
+    const float far_distance
+) {
+    const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0F;
+    const float fov_y_radians = config.fov_y_degrees * 3.14159265F / 180.0F;
+    const float tan_y = std::tan(fov_y_radians * 0.5F);
+    const float tan_x = tan_y * aspect;
+    const Vec3 position{camera.x, camera.y, camera.z};
+    const Vec3 forward = camera_forward(camera);
+    const Vec3 right = camera_right(camera);
+    const Vec3 up = camera_up(camera);
+    std::array<Vec3, 8> corners{};
+    int index = 0;
+    for (const float distance : {near_distance, far_distance}) {
+        const Vec3 center = add3(position, scale3(forward, distance));
+        const Vec3 x = scale3(right, distance * tan_x);
+        const Vec3 y = scale3(up, distance * tan_y);
+        corners[static_cast<std::size_t>(index++)] = add3(add3(center, x), y);
+        corners[static_cast<std::size_t>(index++)] = add3(sub3(center, x), y);
+        corners[static_cast<std::size_t>(index++)] = sub3(sub3(center, x), y);
+        corners[static_cast<std::size_t>(index++)] = add3(sub3(center, y), x);
+    }
+    return corners;
+}
+
+SunShadowCascades sun_shadow_cascades(
+    const WorldLighting& lighting,
+    const GameCamera& camera,
+    const GameRenderConfig& config,
+    const int width,
+    const int height
+) {
+    constexpr std::array<float, kSunShadowCascadeCount> splits{2048.0F, 8192.0F, 32768.0F, 131072.0F};
     const Vec3 sun_direction = normalize3(lighting.sun_direction, WorldLighting{}.sun_direction);
-    const Vec3 center{camera.x, camera.y, camera.z};
-    const float half_extent = 2048.0F;
-    const float depth_extent = 4096.0F;
-    const Vec3 eye = sub3(center, scale3(sun_direction, depth_extent * 0.5F));
     const Vec3 up = std::abs(sun_direction.y) > 0.92F ? Vec3{0.0F, 0.0F, 1.0F} : Vec3{0.0F, 1.0F, 0.0F};
-    const Mat4 projection = orthographic_matrix(-half_extent, half_extent, -half_extent, half_extent, 1.0F, depth_extent);
-    return multiply(projection, look_at_matrix(eye, center, up));
+    const Vec3 light_forward = sun_direction;
+    const Vec3 light_right = normalize3(cross3(light_forward, up), Vec3{1.0F, 0.0F, 0.0F});
+    const Vec3 light_up = cross3(light_right, light_forward);
+    SunShadowCascades cascades{};
+    float cascade_near = std::max(config.near_plane, 1.0F);
+    for (int cascade_index = 0; cascade_index < kSunShadowCascadeCount; ++cascade_index) {
+        const float cascade_far = splits[static_cast<std::size_t>(cascade_index)];
+        const std::array<Vec3, 8> corners =
+            frustum_slice_corners(camera, config, width, height, cascade_near, cascade_far);
+        Vec3 center{};
+        for (const Vec3 corner : corners) {
+            center = add3(center, corner);
+        }
+        center = scale3(center, 1.0F / static_cast<float>(corners.size()));
+
+        float min_x = std::numeric_limits<float>::max();
+        float min_y = std::numeric_limits<float>::max();
+        float min_z = std::numeric_limits<float>::max();
+        float max_x = -std::numeric_limits<float>::max();
+        float max_y = -std::numeric_limits<float>::max();
+        float max_z = -std::numeric_limits<float>::max();
+        for (const Vec3 corner : corners) {
+            const Vec3 relative = sub3(corner, center);
+            const float x = dot3(relative, light_right);
+            const float y = dot3(relative, light_up);
+            const float z = dot3(relative, light_forward);
+            min_x = std::min(min_x, x);
+            min_y = std::min(min_y, y);
+            min_z = std::min(min_z, z);
+            max_x = std::max(max_x, x);
+            max_y = std::max(max_y, y);
+            max_z = std::max(max_z, z);
+        }
+
+        const float span = std::max({max_x - min_x, max_y - min_y, max_z - min_z, 1.0F});
+        const float padding = std::max(64.0F, span * 0.025F);
+        const float extent_x = std::max((max_x - min_x) + (padding * 2.0F), 1.0F);
+        const float extent_y = std::max((max_y - min_y) + (padding * 2.0F), 1.0F);
+        const float world_texel = std::max(std::max(extent_x, extent_y) / static_cast<float>(kSunShadowResolution), 0.001F);
+        const float center_right = dot3(center, light_right);
+        const float center_up = dot3(center, light_up);
+        const float snapped_right = std::round(center_right / world_texel) * world_texel;
+        const float snapped_up = std::round(center_up / world_texel) * world_texel;
+        center = add3(
+            center,
+            add3(
+                scale3(light_right, snapped_right - center_right),
+                scale3(light_up, snapped_up - center_up)
+            )
+        );
+        const Vec3 eye = add3(center, scale3(light_forward, min_z - padding));
+        const Vec3 target = add3(eye, light_forward);
+        const float depth_extent = std::max((max_z - min_z) + (padding * 2.0F), 2.0F);
+        const Mat4 projection = orthographic_matrix(
+            min_x - padding,
+            max_x + padding,
+            min_y - padding,
+            max_y + padding,
+            1.0F,
+            depth_extent
+        );
+        cascades[static_cast<std::size_t>(cascade_index)].matrix =
+            multiply(projection, look_at_matrix(eye, target, up));
+        const int tile_x = (cascade_index % kSunShadowCascadeGrid) * kSunShadowResolution;
+        const int tile_y = (cascade_index / kSunShadowCascadeGrid) * kSunShadowResolution;
+        const float inv_atlas = 1.0F / static_cast<float>(kSunShadowAtlasSize);
+        cascades[static_cast<std::size_t>(cascade_index)].rect = {
+            static_cast<float>(tile_x) * inv_atlas,
+            static_cast<float>(tile_y) * inv_atlas,
+            static_cast<float>(kSunShadowResolution) * inv_atlas,
+            static_cast<float>(kSunShadowResolution) * inv_atlas,
+        };
+        cascades[static_cast<std::size_t>(cascade_index)].split_distance = cascade_far;
+        cascade_near = cascade_far;
+    }
+    return cascades;
 }
 
 float point_light_priority(const PointLight& light, const Vec3 camera_position) {
@@ -218,6 +382,104 @@ float point_light_priority(const PointLight& light, const Vec3 camera_position) 
     return std::max(light.intensity, 0.0F) * std::max(light.radius, 0.0F) / distance;
 }
 
+void draw_shadow_sector_ranges(const RuntimeRenderCache& render_cache, const std::vector<int>& sector_ids) {
+    for (const int sector_id : sector_ids) {
+        if (sector_id < 0 || sector_id >= static_cast<int>(render_cache.sector_ranges.size())) {
+            continue;
+        }
+
+        const RuntimeRenderRange range = render_cache.sector_ranges[static_cast<std::size_t>(sector_id)];
+        if (range.vertex_count <= 0) {
+            continue;
+        }
+        glDrawArrays(GL_TRIANGLES, range.first_vertex, range.vertex_count);
+    }
+}
+
+std::vector<int>& point_shadow_sectors_for_light(
+    DeferredRenderer& renderer,
+    const RuntimeWorld& world,
+    const PointLight& light
+) {
+    renderer.shadow_sector_ids.clear();
+    const float radius = std::max(light.radius, 1.0F);
+    const RuntimeBounds2 bounds{
+        light.position.x - radius,
+        light.position.z - radius,
+        light.position.x + radius,
+        light.position.z + radius,
+    };
+
+    const std::vector<int> candidates = sectors_in_bounds(world, bounds);
+    renderer.shadow_sector_ids.reserve(candidates.size());
+    const float min_y = light.position.y - radius;
+    const float max_y = light.position.y + radius;
+    for (const int sector_id : candidates) {
+        if (sector_id < 0 || sector_id >= static_cast<int>(world.sectors.size())) {
+            continue;
+        }
+        const RuntimeSector& sector = world.sectors[static_cast<std::size_t>(sector_id)];
+        if (sector.max_ceiling_height < min_y || sector.min_floor_height > max_y) {
+            continue;
+        }
+        renderer.shadow_sector_ids.push_back(sector_id);
+    }
+    return renderer.shadow_sector_ids;
+}
+
+bool sector_intersects_sun_cascade(const RuntimeSector& sector, const SunShadowCascade& cascade) {
+    constexpr float padding = 0.035F;
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float min_z = std::numeric_limits<float>::max();
+    float max_x = -std::numeric_limits<float>::max();
+    float max_y = -std::numeric_limits<float>::max();
+    float max_z = -std::numeric_limits<float>::max();
+
+    for (const float x : {sector.bounds.min_x, sector.bounds.max_x}) {
+        for (const float y : {sector.min_floor_height, sector.max_ceiling_height}) {
+            for (const float z : {sector.bounds.min_y, sector.bounds.max_y}) {
+                const std::array<float, 4> clip = transform_point(cascade.matrix, Vec3{x, y, z});
+                if (std::abs(clip[3]) <= 0.00001F) {
+                    return true;
+                }
+                const float inv_w = 1.0F / clip[3];
+                const float ndc_x = clip[0] * inv_w;
+                const float ndc_y = clip[1] * inv_w;
+                const float ndc_z = clip[2] * inv_w;
+                min_x = std::min(min_x, ndc_x);
+                min_y = std::min(min_y, ndc_y);
+                min_z = std::min(min_z, ndc_z);
+                max_x = std::max(max_x, ndc_x);
+                max_y = std::max(max_y, ndc_y);
+                max_z = std::max(max_z, ndc_z);
+            }
+        }
+    }
+
+    return max_x >= -1.0F - padding &&
+        min_x <= 1.0F + padding &&
+        max_y >= -1.0F - padding &&
+        min_y <= 1.0F + padding &&
+        max_z >= -1.0F - padding &&
+        min_z <= 1.0F + padding;
+}
+
+std::vector<int>& sun_shadow_sectors_for_cascade(
+    DeferredRenderer& renderer,
+    const RuntimeWorld& world,
+    const SunShadowCascade& cascade
+) {
+    renderer.shadow_sector_ids.clear();
+    renderer.shadow_sector_ids.reserve(world.sectors.size());
+    for (int sector_id = 0; sector_id < static_cast<int>(world.sectors.size()); ++sector_id) {
+        if (sector_intersects_sun_cascade(world.sectors[static_cast<std::size_t>(sector_id)], cascade)) {
+            renderer.shadow_sector_ids.push_back(sector_id);
+        }
+    }
+    return renderer.shadow_sector_ids;
+}
+
 } // namespace
 
 void set_game_projection(
@@ -226,20 +488,7 @@ void set_game_projection(
     const GameCamera& camera,
     const GameRenderConfig& config
 ) {
-    const double aspect = height > 0 ? static_cast<double>(width) / static_cast<double>(height) : 1.0;
-    const double fov_y_radians = static_cast<double>(config.fov_y_degrees) * 3.14159265358979323846 / 180.0;
-    const double top = std::tan(fov_y_radians * 0.5) * config.near_plane;
-    const double right = top * aspect;
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glFrustum(-right, right, -top, top, config.near_plane, config.far_plane);
-
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glRotatef(-camera.pitch * 180.0F / 3.14159265F, 1.0F, 0.0F, 0.0F);
-    glRotatef(-camera.yaw * 180.0F / 3.14159265F, 0.0F, 1.0F, 0.0F);
-    glTranslatef(-camera.x, -camera.y, -camera.z);
+    core_set_mvp(game_view_projection_matrix(width, height, camera, config).m);
 }
 
 void draw_player_spawn_3d(
@@ -257,22 +506,22 @@ void draw_player_spawn_3d(
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(1.0F, 0.82F, 0.25F, 0.95F);
+    core_color4f(1.0F, 0.82F, 0.25F, 0.95F);
     glLineWidth(2.0F);
     const float feet = spawn.position.y - config.player_eye_height;
     const float head = feet + config.player_height;
     const float x = spawn.position.x;
     const float z = spawn.position.z;
-    glBegin(GL_LINES);
-    glVertex3f(x, feet, z);
-    glVertex3f(x, head, z);
-    glVertex3f(x - config.player_radius, feet, z);
-    glVertex3f(x + config.player_radius, feet, z);
-    glVertex3f(x, feet, z - config.player_radius);
-    glVertex3f(x, feet, z + config.player_radius);
-    glVertex3f(x, spawn.position.y, z);
-    glVertex3f(x - std::sin(spawn.yaw) * 24.0F, spawn.position.y, z - std::cos(spawn.yaw) * 24.0F);
-    glEnd();
+    core_begin(GL_LINES);
+    core_vertex3f(x, feet, z);
+    core_vertex3f(x, head, z);
+    core_vertex3f(x - config.player_radius, feet, z);
+    core_vertex3f(x + config.player_radius, feet, z);
+    core_vertex3f(x, feet, z - config.player_radius);
+    core_vertex3f(x, feet, z + config.player_radius);
+    core_vertex3f(x, spawn.position.y, z);
+    core_vertex3f(x - std::sin(spawn.yaw) * 24.0F, spawn.position.y, z - std::cos(spawn.yaw) * 24.0F);
+    core_end();
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }
@@ -292,41 +541,53 @@ void draw_point_lights_3d(
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(1.0F, 0.86F, 0.35F, 0.92F);
+    core_color4f(1.0F, 0.86F, 0.35F, 0.92F);
     glLineWidth(2.0F);
-    glBegin(GL_LINES);
+    core_begin(GL_LINES);
     for (const PointLight& light : point_lights) {
         const float x = light.position.x;
         const float y = light.position.y;
         const float z = light.position.z;
         constexpr float s = 8.0F;
-        glVertex3f(x - s, y, z);
-        glVertex3f(x + s, y, z);
-        glVertex3f(x, y - s, z);
-        glVertex3f(x, y + s, z);
-        glVertex3f(x, y, z - s);
-        glVertex3f(x, y, z + s);
-        glVertex3f(x - s, y - s, z);
-        glVertex3f(x + s, y + s, z);
-        glVertex3f(x - s, y + s, z);
-        glVertex3f(x + s, y - s, z);
+        core_vertex3f(x - s, y, z);
+        core_vertex3f(x + s, y, z);
+        core_vertex3f(x, y - s, z);
+        core_vertex3f(x, y + s, z);
+        core_vertex3f(x, y, z - s);
+        core_vertex3f(x, y, z + s);
+        core_vertex3f(x - s, y - s, z);
+        core_vertex3f(x + s, y + s, z);
+        core_vertex3f(x - s, y + s, z);
+        core_vertex3f(x + s, y - s, z);
     }
-    glEnd();
+    core_end();
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }
 
 bool render_vsm_shadow_maps(
     DeferredRenderer& renderer,
+    const RuntimeWorld& world,
     const RuntimeRenderCache& render_cache,
     const std::vector<PointLight>& lights,
     const PackedPointShadowAtlas& atlas,
     const WorldLighting& world_lighting,
-    const GameCamera& camera
+    const GameCamera& camera,
+    const GameRenderConfig& config,
+    SunShadowCascades& sun_cascades
 ) {
     renderer.last_shadow_ms = 0.0;
-    const bool render_point_shadows = atlas.shadowed_lights > 0;
-    const bool render_sun_shadow = world_lighting.sun_enabled && world_lighting.sun_intensity > 0.0F;
+    renderer.last_point_shadow_lights_rendered = 0;
+    renderer.last_point_shadow_faces_rendered = 0;
+    renderer.last_sun_shadow_cascades_rendered = 0;
+    renderer.last_shadow_cache_hits = 0;
+    renderer.last_shadow_cache_misses = 0;
+    const bool render_point_shadows = config.vsm_shadows_enabled && atlas.shadowed_lights > 0;
+    const bool render_sun_shadow =
+        config.vsm_shadows_enabled &&
+        config.csm_shadows_enabled &&
+        world_lighting.sun_enabled &&
+        world_lighting.sun_intensity > 0.0F;
     if (renderer.shadows_disabled ||
         renderer.shadow_framebuffer == 0 ||
         renderer.point_shadow_texture == 0 ||
@@ -339,9 +600,75 @@ bool render_vsm_shadow_maps(
         return false;
     }
 
+    const std::uint64_t shadow_revision = std::max<std::uint64_t>(render_cache.shadow_revision, 1);
+    bool point_layout_changed = false;
+    bool point_shadow_dirty = false;
+    int active_point_shadows = 0;
+    int point_cache_hits = 0;
+    int point_cache_misses = 0;
+    if (render_point_shadows) {
+        for (const PointShadowAtlasEntry& entry : atlas.entries) {
+            if (!entry.shadowed || entry.light_index < 0 || entry.light_index >= static_cast<int>(lights.size())) {
+                continue;
+            }
+            ++active_point_shadows;
+            const PointLight& light = lights[static_cast<std::size_t>(entry.light_index)];
+            const std::uint64_t key = point_shadow_cache_key(light, entry.light_index);
+            const auto it = renderer.point_shadow_cache.find(key);
+            const bool matches = it != renderer.point_shadow_cache.end() &&
+                point_shadow_cache_matches(it->second, light, entry.light_index, entry, shadow_revision);
+            if (it != renderer.point_shadow_cache.end() &&
+                it->second.valid &&
+                !shadow_atlas_faces_equal(it->second.faces, entry.faces)) {
+                point_layout_changed = true;
+            }
+            if (matches) {
+                ++point_cache_hits;
+            } else {
+                ++point_cache_misses;
+                point_shadow_dirty = true;
+            }
+        }
+        if (point_layout_changed) {
+            point_cache_hits = 0;
+            point_cache_misses = active_point_shadows;
+        }
+        renderer.last_shadow_cache_hits += point_cache_hits;
+        renderer.last_shadow_cache_misses += point_cache_misses;
+    }
+
+    bool sun_shadow_dirty = false;
+    if (render_sun_shadow) {
+        const std::array<std::array<float, 16>, kSunShadowCascadeCount> matrices = sun_cascade_matrices(sun_cascades);
+        const Vec3 sun_direction = normalize3(world_lighting.sun_direction, WorldLighting{}.sun_direction);
+        if (sun_shadow_cache_matches(
+                renderer.sun_shadow_cache,
+                shadow_revision,
+                sun_direction,
+                renderer.width,
+                renderer.height,
+                config.fov_y_degrees,
+                config.near_plane,
+                config.far_plane,
+                camera.yaw,
+                camera.pitch,
+                matrices)) {
+            restore_cached_sun_cascades(renderer, sun_cascades);
+            ++renderer.last_shadow_cache_hits;
+        } else {
+            sun_shadow_dirty = true;
+            ++renderer.last_shadow_cache_misses;
+        }
+    }
+
+    if (!point_shadow_dirty && !sun_shadow_dirty) {
+        return true;
+    }
+
     const auto shadow_start = std::chrono::steady_clock::now();
 
     glBindFramebuffer(GL_FRAMEBUFFER, renderer.shadow_framebuffer);
+    glBindVertexArray(renderer.shadow_vao);
     glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(
@@ -356,10 +683,9 @@ bool render_vsm_shadow_maps(
     glDisable(GL_BLEND);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-    if (render_point_shadows) {
+    if (render_point_shadows && point_shadow_dirty) {
         glViewport(0, 0, kPointShadowAtlasSize, kPointShadowAtlasSize);
         glBindRenderbuffer(GL_RENDERBUFFER, renderer.point_shadow_depth_renderbuffer);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kPointShadowAtlasSize, kPointShadowAtlasSize);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, renderer.point_shadow_depth_renderbuffer);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, renderer.point_shadow_texture, 0);
         glDrawBuffer(GL_COLOR_ATTACHMENT0);
@@ -373,7 +699,11 @@ bool render_vsm_shadow_maps(
             return false;
         }
         glClearColor(1.0F, 1.0F, 0.0F, 0.0F);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (point_layout_changed) {
+            glDisable(GL_SCISSOR_TEST);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            renderer.point_shadow_cache.clear();
+        }
         glUseProgram(renderer.point_shadow_program);
         glEnable(GL_SCISSOR_TEST);
         for (const PointShadowAtlasEntry& entry : atlas.entries) {
@@ -381,6 +711,15 @@ bool render_vsm_shadow_maps(
                 continue;
             }
             const PointLight& light = lights[static_cast<std::size_t>(entry.light_index)];
+            const std::uint64_t key = point_shadow_cache_key(light, entry.light_index);
+            const auto it = renderer.point_shadow_cache.find(key);
+            const bool cache_hit = !point_layout_changed &&
+                it != renderer.point_shadow_cache.end() &&
+                point_shadow_cache_matches(it->second, light, entry.light_index, entry, shadow_revision);
+            if (cache_hit) {
+                continue;
+            }
+            ++renderer.last_point_shadow_lights_rendered;
             const std::array<Mat4, 6> matrices = point_shadow_matrices(light);
             glUniform3f(
                 renderer.point_shadow_uniforms.light_position,
@@ -389,29 +728,35 @@ bool render_vsm_shadow_maps(
                 light.position.z
             );
             glUniform1f(renderer.point_shadow_uniforms.light_radius, std::max(light.radius, 1.0F));
+            const std::vector<int>& shadow_sector_ids = point_shadow_sectors_for_light(renderer, world, light);
             for (int face = 0; face < 6; ++face) {
                 const ShadowAtlasRect rect = entry.faces[static_cast<std::size_t>(face)];
                 glViewport(rect.x, rect.y, rect.size, rect.size);
                 glScissor(rect.x, rect.y, rect.size, rect.size);
+                if (!point_layout_changed) {
+                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                }
                 glUniformMatrix4fv(
                     renderer.point_shadow_uniforms.light_matrix,
                     1,
                     GL_FALSE,
                     matrices[static_cast<std::size_t>(face)].m.data()
                 );
-                glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
+                draw_shadow_sector_ranges(render_cache, shadow_sector_ids);
+                ++renderer.last_point_shadow_faces_rendered;
             }
+            renderer.point_shadow_cache[key] =
+                make_point_shadow_cache_entry(light, entry.light_index, entry, shadow_revision);
         }
         glDisable(GL_SCISSOR_TEST);
     }
 
-    if (render_sun_shadow) {
-        const Mat4 matrix = sun_shadow_matrix(world_lighting, camera);
-        glViewport(0, 0, kSunShadowResolution, kSunShadowResolution);
+    if (render_sun_shadow && sun_shadow_dirty) {
+        glViewport(0, 0, kSunShadowAtlasSize, kSunShadowAtlasSize);
         glBindRenderbuffer(GL_RENDERBUFFER, renderer.sun_shadow_depth_renderbuffer);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kSunShadowResolution, kSunShadowResolution);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, renderer.sun_shadow_depth_renderbuffer);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, renderer.sun_shadow_texture, 0);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             renderer.shadows_disabled = true;
             glDisableVertexAttribArray(0);
@@ -424,17 +769,47 @@ bool render_vsm_shadow_maps(
         glClearColor(1.0F, 1.0F, 0.0F, 0.0F);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(renderer.sun_shadow_program);
-        glUniformMatrix4fv(
-            renderer.sun_shadow_uniforms.light_matrix,
-            1,
-            GL_FALSE,
-            matrix.m.data()
+        glEnable(GL_SCISSOR_TEST);
+        for (int cascade_index = 0; cascade_index < kSunShadowCascadeCount; ++cascade_index) {
+            const int tile_x = (cascade_index % kSunShadowCascadeGrid) * kSunShadowResolution;
+            const int tile_y = (cascade_index / kSunShadowCascadeGrid) * kSunShadowResolution;
+            glViewport(tile_x, tile_y, kSunShadowResolution, kSunShadowResolution);
+            glScissor(tile_x, tile_y, kSunShadowResolution, kSunShadowResolution);
+            glUniformMatrix4fv(
+                renderer.sun_shadow_uniforms.light_matrix,
+                1,
+                GL_FALSE,
+                sun_cascades[static_cast<std::size_t>(cascade_index)].matrix.m.data()
+            );
+            draw_shadow_sector_ranges(
+                render_cache,
+                sun_shadow_sectors_for_cascade(
+                    renderer,
+                    world,
+                    sun_cascades[static_cast<std::size_t>(cascade_index)]
+                )
+            );
+            ++renderer.last_sun_shadow_cascades_rendered;
+        }
+        glDisable(GL_SCISSOR_TEST);
+        cache_sun_cascades(renderer, sun_cascades);
+        renderer.sun_shadow_cache = make_sun_shadow_cache_entry(
+            shadow_revision,
+            normalize3(world_lighting.sun_direction, WorldLighting{}.sun_direction),
+            renderer.width,
+            renderer.height,
+            config.fov_y_degrees,
+            config.near_plane,
+            config.far_plane,
+            camera.yaw,
+            camera.pitch,
+            sun_cascade_matrices(sun_cascades)
         );
-        glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
     }
 
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
     glUseProgram(0);
     glBindRenderbuffer(GL_RENDERBUFFER, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -507,12 +882,9 @@ bool render_screen_space_sun_shadow(
         view_projection.m.data()
     );
 
-    glBegin(GL_QUADS);
-    glVertex2f(-1.0F, -1.0F);
-    glVertex2f(1.0F, -1.0F);
-    glVertex2f(1.0F, 1.0F);
-    glVertex2f(-1.0F, 1.0F);
-    glEnd();
+    glBindVertexArray(renderer.fullscreen_vao);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glBindVertexArray(0);
 
     glUseProgram(0);
     glActiveTexture(GL_TEXTURE2);
@@ -562,24 +934,17 @@ int draw_runtime_world(
     int visible_triangle_count = 0;
 
     if (render_cache.vertex_buffer != 0 && render_cache.total_vertices > 0) {
-        glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_COLOR_ARRAY);
-        glVertexPointer(
-            3,
-            GL_FLOAT,
-            sizeof(RuntimeRenderVertex),
-            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, x))
-        );
-        glColorPointer(
-            3,
-            GL_FLOAT,
-            sizeof(RuntimeRenderVertex),
-            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, r))
-        );
-
         if (!filter_visible_sectors) {
-            glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
+            core_draw_colored_arrays(
+                GL_TRIANGLES,
+                render_cache.vertex_buffer,
+                0,
+                render_cache.total_vertices,
+                sizeof(RuntimeRenderVertex),
+                offsetof(RuntimeRenderVertex, x),
+                offsetof(RuntimeRenderVertex, r),
+                3
+            );
             visible_triangle_count = render_cache.total_vertices / 3;
         } else {
             for (const int sector_id : visible_sectors) {
@@ -590,33 +955,38 @@ int draw_runtime_world(
                 if (range.vertex_count <= 0) {
                     continue;
                 }
-                glDrawArrays(GL_TRIANGLES, range.first_vertex, range.vertex_count);
+                core_draw_colored_arrays(
+                    GL_TRIANGLES,
+                    render_cache.vertex_buffer,
+                    range.first_vertex,
+                    range.vertex_count,
+                    sizeof(RuntimeRenderVertex),
+                    offsetof(RuntimeRenderVertex, x),
+                    offsetof(RuntimeRenderVertex, r),
+                    3
+                );
                 visible_triangle_count += range.vertex_count / 3;
             }
         }
-
-        glDisableClientState(GL_COLOR_ARRAY);
-        glDisableClientState(GL_VERTEX_ARRAY);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 
     if (draw_wire_overlay) {
-        glBegin(GL_LINES);
-        glColor4f(0.84F, 0.96F, 0.78F, 0.58F);
+        core_begin(GL_LINES);
+        core_color4f(0.84F, 0.96F, 0.78F, 0.58F);
         for (const RuntimeTaggedTriangle& tagged_triangle : world.triangles) {
             if (!is_visible(tagged_triangle.sector_id)) {
                 continue;
             }
 
             const RuntimeTriangle& triangle = tagged_triangle.triangle;
-            glVertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
-            glVertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
-            glVertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
-            glVertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
-            glVertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
-            glVertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
+            core_vertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
+            core_vertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
+            core_vertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
+            core_vertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
+            core_vertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
+            core_vertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
         }
-        glEnd();
+        core_end();
     }
 
     return visible_triangle_count;
@@ -692,7 +1062,7 @@ int draw_deferred_runtime_world(
             lights,
             camera_position,
             kMaxDeferredPointLights,
-            using_fallback_light ? 0 : kMaxPointShadowedLights,
+            (!config.vsm_shadows_enabled || using_fallback_light) ? 0 : kMaxPointShadowedLights,
             kPointShadowAtlasSize
         );
     if (!using_fallback_light &&
@@ -704,9 +1074,19 @@ int draw_deferred_runtime_world(
         renderer.last_shadow_submitted_lights = shadow_atlas.submitted_lights;
         renderer.last_shadow_packed_lights = shadow_atlas.shadowed_lights;
     }
+    SunShadowCascades cascades = sun_shadow_cascades(world_lighting, camera, config, width, height);
     const bool shadows_ready =
-        render_vsm_shadow_maps(renderer, render_cache, lights, shadow_atlas, world_lighting, camera);
-    const Mat4 sun_matrix = sun_shadow_matrix(world_lighting, camera);
+        render_vsm_shadow_maps(
+            renderer,
+            world,
+            render_cache,
+            lights,
+            shadow_atlas,
+            world_lighting,
+            camera,
+            config,
+            cascades
+        );
     const Mat4 view_projection = game_view_projection_matrix(width, height, camera, config);
     renderer.last_shadow_pack_upload_ms = elapsed_ms(pack_start) - renderer.last_shadow_ms;
 
@@ -738,6 +1118,8 @@ int draw_deferred_runtime_world(
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glUseProgram(renderer.geometry_program);
+    glUniformMatrix4fv(renderer.geometry_view_projection, 1, GL_FALSE, view_projection.m.data());
+    glBindVertexArray(renderer.geometry_vao);
     glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
@@ -798,6 +1180,7 @@ int draw_deferred_runtime_world(
     glDisableVertexAttribArray(1);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     renderer.last_gbuffer_ms = elapsed_ms(gbuffer_start);
@@ -848,9 +1231,21 @@ int draw_deferred_runtime_world(
     glActiveTexture(GL_TEXTURE6);
     glBindTexture(GL_TEXTURE_2D, shadows_ready ? renderer.sun_shadow_texture : 0);
     glUniform1i(uniforms.sun_shadow_moments, 6);
-    glUniform1i(uniforms.point_shadows_enabled, shadows_ready && shadow_atlas.shadowed_lights > 0 ? 1 : 0);
+    glUniform1i(
+        uniforms.point_shadows_enabled,
+        config.vsm_shadows_enabled && shadows_ready && shadow_atlas.shadowed_lights > 0 ? 1 : 0
+    );
     glUniform1i(uniforms.sun_enabled, world_lighting.sun_enabled ? 1 : 0);
-    glUniform1i(uniforms.sun_shadow_enabled, shadows_ready && world_lighting.sun_enabled && world_lighting.sun_intensity > 0.0F ? 1 : 0);
+    glUniform1i(
+        uniforms.sun_shadow_enabled,
+        config.vsm_shadows_enabled &&
+                config.csm_shadows_enabled &&
+                shadows_ready &&
+                world_lighting.sun_enabled &&
+                world_lighting.sun_intensity > 0.0F
+            ? 1
+            : 0
+    );
     glUniform3f(
         uniforms.sun_direction,
         world_lighting.sun_direction.x,
@@ -864,13 +1259,36 @@ int draw_deferred_runtime_world(
         world_lighting.sun_color.z
     );
     glUniform1f(uniforms.sun_intensity, world_lighting.sun_intensity);
-    glUniformMatrix4fv(
-        uniforms.sun_shadow_matrix,
-        1,
-        GL_FALSE,
-        sun_matrix.m.data()
+    std::array<float, kSunShadowCascadeCount * 16> sun_matrix_values{};
+    std::array<float, kSunShadowCascadeCount * 4> sun_rect_values{};
+    for (int cascade_index = 0; cascade_index < kSunShadowCascadeCount; ++cascade_index) {
+        const SunShadowCascade& cascade = cascades[static_cast<std::size_t>(cascade_index)];
+        std::copy(
+            cascade.matrix.m.begin(),
+            cascade.matrix.m.end(),
+            sun_matrix_values.begin() + (cascade_index * 16)
+        );
+        std::copy(
+            cascade.rect.begin(),
+            cascade.rect.end(),
+            sun_rect_values.begin() + (cascade_index * 4)
+        );
+    }
+    glUniformMatrix4fv(uniforms.sun_shadow_matrices, kSunShadowCascadeCount, GL_FALSE, sun_matrix_values.data());
+    glUniform4fv(uniforms.sun_shadow_rects, kSunShadowCascadeCount, sun_rect_values.data());
+    glUniform4f(
+        uniforms.sun_cascade_splits,
+        cascades[0].split_distance,
+        cascades[1].split_distance,
+        cascades[2].split_distance,
+        cascades[3].split_distance
     );
+    const Vec3 forward = camera_forward(camera);
+    glUniform3f(uniforms.camera_forward, forward.x, forward.y, forward.z);
     glUniform1i(uniforms.screen_space_shadows_enabled, screen_shadows_ready ? 1 : 0);
+    glUniform1i(uniforms.fog_enabled, config.fog_enabled ? 1 : 0);
+    glUniform2f(uniforms.fog_start_end, config.fog_start, config.fog_end);
+    glUniform3f(uniforms.fog_color, config.fog_color.x, config.fog_color.y, config.fog_color.z);
     glUniform1i(uniforms.light_count, submitted_light_count);
     const auto upload_start = std::chrono::steady_clock::now();
     renderer.point_light_records.assign(static_cast<std::size_t>(submitted_light_count), GpuPointLight{});
@@ -929,12 +1347,9 @@ int draw_deferred_runtime_world(
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     renderer.last_shadow_pack_upload_ms += elapsed_ms(upload_start);
 
-    glBegin(GL_QUADS);
-    glVertex2f(-1.0F, -1.0F);
-    glVertex2f(1.0F, -1.0F);
-    glVertex2f(1.0F, 1.0F);
-    glVertex2f(-1.0F, 1.0F);
-    glEnd();
+    glBindVertexArray(renderer.fullscreen_vao);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glBindVertexArray(0);
     glUseProgram(0);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
@@ -958,8 +1373,8 @@ int draw_deferred_runtime_world(
         const auto wire_start = std::chrono::steady_clock::now();
         set_game_projection(width, height, camera, config);
         glDisable(GL_DEPTH_TEST);
-        glBegin(GL_LINES);
-        glColor4f(0.84F, 0.96F, 0.78F, 0.58F);
+        core_begin(GL_LINES);
+        core_color4f(0.84F, 0.96F, 0.78F, 0.58F);
         for (const RuntimeTaggedTriangle& tagged_triangle : world.triangles) {
             if (filter_visible_sectors &&
                 std::find(visible_sectors.begin(), visible_sectors.end(), tagged_triangle.sector_id) == visible_sectors.end()) {
@@ -967,14 +1382,14 @@ int draw_deferred_runtime_world(
             }
 
             const RuntimeTriangle& triangle = tagged_triangle.triangle;
-            glVertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
-            glVertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
-            glVertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
-            glVertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
-            glVertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
-            glVertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
+            core_vertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
+            core_vertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
+            core_vertex3f(triangle.b.x, triangle.b.y, triangle.b.z);
+            core_vertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
+            core_vertex3f(triangle.c.x, triangle.c.y, triangle.c.z);
+            core_vertex3f(triangle.a.x, triangle.a.y, triangle.a.z);
         }
-        glEnd();
+        core_end();
         renderer.last_wire_overlay_ms = elapsed_ms(wire_start);
     }
 

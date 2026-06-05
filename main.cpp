@@ -15,6 +15,8 @@
 #include <vector>
 
 #include <glad/glad.h>
+
+#include "undecedent/core_draw.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
 
@@ -38,6 +40,10 @@
 #include "undecedent/triangulator.hpp"
 
 namespace {
+using undecedent::core_begin;
+using undecedent::core_color4f;
+using undecedent::core_end;
+using undecedent::core_set_identity_mvp;
 using undecedent::draw_screen_line;
 using undecedent::draw_screen_quad;
 using undecedent::draw_editor_2d_view;
@@ -88,6 +94,7 @@ using undecedent::GameCamera;
 using undecedent::GameControlConfig;
 using undecedent::GameRenderConfig;
 using undecedent::handle_entity_dropdown_click;
+using undecedent::kCoreQuads;
 using undecedent::handle_entity_inspector_click;
 using undecedent::handle_sculpt_button_click;
 using undecedent::handle_subdivision_controls_click;
@@ -175,6 +182,11 @@ struct ProfilerDisplay {
     int visible_triangles = 0;
     int sectors = 0;
     int walls = 0;
+    int shadow_cache_hits = 0;
+    int shadow_cache_misses = 0;
+    int point_shadow_lights = 0;
+    int point_shadow_faces = 0;
+    int sun_shadow_cascades = 0;
 };
 
 struct ProfilerAccumulator {
@@ -219,6 +231,23 @@ struct BenchmarkAccumulator {
     int frames = 0;
 };
 
+struct EffectsMenuLayout {
+    float x = 0.0F;
+    float y = 0.0F;
+    float w = 0.0F;
+    float h = 0.0F;
+    float row_y = 0.0F;
+    float row_h = 0.0F;
+};
+
+enum class RenderEffectToggle {
+    None,
+    Vsm,
+    Csm,
+    ScreenSpace,
+    Fog,
+};
+
 struct MapDialogRequests {
     std::mutex mutex;
     std::string pending_save_path;
@@ -249,6 +278,129 @@ std::string format_fps(const double fps) {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(fps >= 1000.0 ? 0 : 1) << fps;
     return stream.str();
+}
+
+bool point_in_screen_rect(
+    const float px,
+    const float py,
+    const float x,
+    const float y,
+    const float w,
+    const float h
+) {
+    return px >= x && px <= x + w && py >= y && py <= y + h;
+}
+
+EffectsMenuLayout effects_menu_layout(const int width, const int height) {
+    constexpr float menu_w = 230.0F;
+    constexpr float title_h = 30.0F;
+    constexpr float row_h = 28.0F;
+    constexpr float pad = 16.0F;
+    constexpr float rows = 4.0F;
+    const float menu_h = title_h + row_h * rows + 14.0F;
+    return EffectsMenuLayout{
+        std::max(12.0F, static_cast<float>(width) - menu_w - pad),
+        std::max(12.0F, static_cast<float>(height) - menu_h - pad),
+        menu_w,
+        menu_h,
+        0.0F,
+        row_h,
+    };
+}
+
+void draw_screen_rect_outline(
+    const float x,
+    const float y,
+    const float w,
+    const float h,
+    const int width,
+    const int height
+) {
+    draw_screen_line(x, y, x + w, y, width, height);
+    draw_screen_line(x + w, y, x + w, y + h, width, height);
+    draw_screen_line(x + w, y + h, x, y + h, width, height);
+    draw_screen_line(x, y + h, x, y, width, height);
+}
+
+void set_render_effect_toggle(GameRenderConfig& config, const RenderEffectToggle effect, const bool enabled) {
+    switch (effect) {
+    case RenderEffectToggle::Vsm:
+        config.vsm_shadows_enabled = enabled;
+        std::cout << "VSM shadows " << (enabled ? "enabled" : "disabled") << '\n';
+        break;
+    case RenderEffectToggle::Csm:
+        config.csm_shadows_enabled = enabled;
+        std::cout << "CSM sun shadows " << (enabled ? "enabled" : "disabled") << '\n';
+        break;
+    case RenderEffectToggle::ScreenSpace:
+        config.screen_space_shadows_enabled = enabled;
+        std::cout << "Screen-space shadows " << (enabled ? "enabled" : "disabled") << '\n';
+        break;
+    case RenderEffectToggle::Fog:
+        config.fog_enabled = enabled;
+        std::cout << "Fog " << (enabled ? "enabled" : "disabled") << '\n';
+        break;
+    case RenderEffectToggle::None:
+        break;
+    }
+}
+
+void toggle_render_effect(GameRenderConfig& config, const RenderEffectToggle effect) {
+    switch (effect) {
+    case RenderEffectToggle::Vsm:
+        set_render_effect_toggle(config, effect, !config.vsm_shadows_enabled);
+        break;
+    case RenderEffectToggle::Csm:
+        set_render_effect_toggle(config, effect, !config.csm_shadows_enabled);
+        break;
+    case RenderEffectToggle::ScreenSpace:
+        set_render_effect_toggle(config, effect, !config.screen_space_shadows_enabled);
+        break;
+    case RenderEffectToggle::Fog:
+        set_render_effect_toggle(config, effect, !config.fog_enabled);
+        break;
+    case RenderEffectToggle::None:
+        break;
+    }
+}
+
+RenderEffectToggle render_effect_from_row(const int row) {
+    switch (row) {
+    case 0:
+        return RenderEffectToggle::Vsm;
+    case 1:
+        return RenderEffectToggle::Csm;
+    case 2:
+        return RenderEffectToggle::ScreenSpace;
+    case 3:
+        return RenderEffectToggle::Fog;
+    default:
+        return RenderEffectToggle::None;
+    }
+}
+
+bool handle_effects_menu_click(
+    GameRenderConfig& config,
+    const int width,
+    const int height,
+    const float mouse_x,
+    const float mouse_y
+) {
+    EffectsMenuLayout layout = effects_menu_layout(width, height);
+    if (!point_in_screen_rect(mouse_x, mouse_y, layout.x, layout.y, layout.w, layout.h)) {
+        return false;
+    }
+
+    constexpr float title_h = 30.0F;
+    const float relative_y = mouse_y - layout.y - title_h;
+    if (relative_y >= 0.0F) {
+        const int row = static_cast<int>(relative_y / layout.row_h);
+        const RenderEffectToggle effect = render_effect_from_row(row);
+        if (effect != RenderEffectToggle::None) {
+            toggle_render_effect(config, effect);
+        }
+    }
+    return true;
 }
 
 void queue_dialog_message(MapDialogRequests& requests, std::string message) {
@@ -502,16 +654,16 @@ void draw_fps_counter(const int fps, const int width, const int height) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glBegin(GL_QUADS);
-    glColor4f(0.0F, 0.0F, 0.0F, 0.38F);
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, 0.38F);
     draw_screen_quad(10.0F, 10.0F, box_width, box_height, width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(1.5F);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     draw_stroke_text(label, x, y, size, width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -541,6 +693,10 @@ void draw_profiler_overlay(
         "OVERLAY " + format_ms(profiler.overlay_ms) + "MS",
         "FINISH " + format_ms(profiler.finish_ms) + "MS",
         "SWAP " + format_ms(profiler.swap_ms) + "MS",
+        "SHC " + std::to_string(profiler.shadow_cache_hits) + "/" + std::to_string(profiler.shadow_cache_misses),
+        "SHDRAW P" + std::to_string(profiler.point_shadow_lights) +
+            " F" + std::to_string(profiler.point_shadow_faces) +
+            " C" + std::to_string(profiler.sun_shadow_cascades),
         "TRIS " + std::to_string(profiler.total_triangles) + "/" + std::to_string(profiler.visible_triangles),
         "SECT " + std::to_string(profiler.sectors) + " WALL " + std::to_string(profiler.walls),
     };
@@ -549,18 +705,74 @@ void draw_profiler_overlay(
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glBegin(GL_QUADS);
-    glColor4f(0.0F, 0.0F, 0.0F, 0.42F);
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, 0.42F);
     draw_screen_quad(10.0F, top_y - 6.0F, 236.0F, 12.0F + line_height * static_cast<float>(lines.size()), width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(1.35F);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     for (std::size_t i = 0; i < lines.size(); ++i) {
         draw_stroke_text(lines[i], x, top_y + static_cast<float>(i) * line_height, size, width, height);
     }
-    glEnd();
+    core_end();
+
+    glLineWidth(1.0F);
+    glDisable(GL_BLEND);
+}
+
+void draw_effects_menu(const GameRenderConfig& config, const int width, const int height) {
+    const EffectsMenuLayout layout = effects_menu_layout(width, height);
+    struct Row {
+        const char* label;
+        bool enabled;
+    };
+    const Row rows[] = {
+        {"VSM", config.vsm_shadows_enabled},
+        {"CSM", config.csm_shadows_enabled},
+        {"SSS", config.screen_space_shadows_enabled},
+        {"FOG", config.fog_enabled},
+    };
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, 0.58F);
+    draw_screen_quad(layout.x, layout.y, layout.w, layout.h, width, height);
+    core_end();
+
+    glLineWidth(1.5F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.96F);
+    draw_screen_rect_outline(layout.x, layout.y, layout.w, layout.h, width, height);
+    draw_stroke_text("EFFECTS", layout.x + 10.0F, layout.y + 9.0F, 5.5F, width, height);
+    core_end();
+
+    constexpr float title_h = 30.0F;
+    for (int i = 0; i < 4; ++i) {
+        const float row_y = layout.y + title_h + static_cast<float>(i) * layout.row_h;
+        const float toggle_x = layout.x + layout.w - 54.0F;
+        const float toggle_y = row_y + 6.0F;
+
+        core_begin(kCoreQuads);
+        core_color4f(0.04F, 0.08F, 0.07F, rows[i].enabled ? 0.76F : 0.35F);
+        draw_screen_quad(layout.x + 6.0F, row_y + 2.0F, layout.w - 12.0F, layout.row_h - 4.0F, width, height);
+        if (rows[i].enabled) {
+            core_color4f(0.45F, 0.70F, 0.55F, 0.70F);
+            draw_screen_quad(toggle_x, toggle_y, 40.0F, 16.0F, width, height);
+        }
+        core_end();
+
+        core_begin(GL_LINES);
+        core_color4f(0.90F, 0.96F, 0.76F, 0.95F);
+        draw_stroke_text(rows[i].label, layout.x + 14.0F, row_y + 9.0F, 5.5F, width, height);
+        draw_stroke_text(rows[i].enabled ? "ON" : "OFF", toggle_x + 7.0F, row_y + 10.0F, 4.8F, width, height);
+        draw_screen_rect_outline(toggle_x, toggle_y, 40.0F, 16.0F, width, height);
+        core_end();
+    }
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -711,7 +923,7 @@ int main() {
     bool profiler_enabled = false;
     bool profiler_finish_diagnostic_enabled = false;
     bool runtime_wire_overlay_enabled = false;
-    bool runtime_screen_space_shadows_enabled = true;
+    bool effects_menu_open = false;
     BenchmarkState benchmark{};
     float fps_counter_seconds = 0.0F;
     int fps_counter_frames = 0;
@@ -740,7 +952,6 @@ int main() {
         kPlayerEyeHeight,
         kPlayerHeight,
         kPlayerRadius,
-        runtime_screen_space_shadows_enabled,
     };
     undecedent::DeferredRenderer deferred_renderer{};
     int active_material = undecedent::kDefaultMaterialId;
@@ -775,6 +986,11 @@ int main() {
         double finish_ms = 0.0;
         double swap_ms = 0.0;
         int visible_triangle_count = 0;
+        int shadow_cache_hits = 0;
+        int shadow_cache_misses = 0;
+        int point_shadow_lights = 0;
+        int point_shadow_faces = 0;
+        int sun_shadow_cascades = 0;
 
         const Uint64 events_start_ticks = SDL_GetTicksNS();
         SDL_Event event{};
@@ -879,7 +1095,7 @@ int main() {
                     continue;
                 }
 
-                if (editor_3d && !event.key.repeat) {
+                if (editor_3d && !event.key.repeat && !effects_menu_open) {
                     int material_key = -1;
                     if (key >= SDLK_1 && key <= SDLK_8) {
                         material_key = static_cast<int>(key - SDLK_1);
@@ -952,10 +1168,22 @@ int main() {
                 }
 
                 if ((key == SDLK_F5 || scancode == SDL_SCANCODE_F5) && !event.key.repeat) {
-                    runtime_screen_space_shadows_enabled = !runtime_screen_space_shadows_enabled;
-                    game_render_config.screen_space_shadows_enabled = runtime_screen_space_shadows_enabled;
-                    std::cout << "Screen-space shadows "
-                              << (runtime_screen_space_shadows_enabled ? "enabled" : "disabled") << '\n';
+                    effects_menu_open = !effects_menu_open;
+                    std::cout << "Render effects menu " << (effects_menu_open ? "opened" : "closed") << '\n';
+                    continue;
+                }
+
+                if (effects_menu_open && !event.key.repeat) {
+                    int effect_key = -1;
+                    if (key >= SDLK_1 && key <= SDLK_4) {
+                        effect_key = static_cast<int>(key - SDLK_1);
+                    } else if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_4) {
+                        effect_key = static_cast<int>(scancode - SDL_SCANCODE_1);
+                    }
+                    if (effect_key >= 0) {
+                        toggle_render_effect(game_render_config, render_effect_from_row(effect_key));
+                        continue;
+                    }
                 }
 
                 if ((key == SDLK_F7 || scancode == SDL_SCANCODE_F7) && !event.key.repeat) {
@@ -1018,11 +1246,35 @@ int main() {
                 }
             }
 
+            if (effects_menu_open && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                int width = 0;
+                int height = 0;
+                SDL_GetWindowSizeInPixels(window, &width, &height);
+                const EffectsMenuLayout layout = effects_menu_layout(width, height);
+                if (point_in_screen_rect(
+                        event.button.x,
+                        event.button.y,
+                        layout.x,
+                        layout.y,
+                        layout.w,
+                        layout.h
+                    )) {
+                    if (event.button.button == SDL_BUTTON_LEFT) {
+                        handle_effects_menu_click(game_render_config, width, height, event.button.x, event.button.y);
+                    }
+                    continue;
+                }
+            }
+
             if (app_mode == AppMode::Editor3D && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
                 event.button.button == SDL_BUTTON_LEFT) {
                 int width = 0;
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
+                if (effects_menu_open &&
+                    handle_effects_menu_click(game_render_config, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
                 if (handle_subdivision_controls_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
@@ -1049,6 +1301,10 @@ int main() {
                 int width = 0;
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
+                if (effects_menu_open &&
+                    handle_effects_menu_click(game_render_config, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
                 if (handle_subdivision_controls_click(editor_world, width, height, event.button.x, event.button.y)) {
                     continue;
                 }
@@ -1475,10 +1731,8 @@ int main() {
         }
 
         if (editor_2d_now) {
-            glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            glMatrixMode(GL_MODELVIEW);
-            glLoadIdentity();
+            core_set_identity_mvp();
+            core_set_identity_mvp();
             draw_editor_2d_view(editor_world, width, height, editor_camera, editor_2d_render_config);
         } else if (runtime_view_now) {
             if (app_mode == AppMode::Playtest) {
@@ -1500,6 +1754,11 @@ int main() {
                 screen_shadow_ms = deferred_renderer.last_screen_shadow_ms;
                 lighting_ms = deferred_renderer.last_lighting_ms;
                 wire_overlay_ms = deferred_renderer.last_wire_overlay_ms;
+                shadow_cache_hits = deferred_renderer.last_shadow_cache_hits;
+                shadow_cache_misses = deferred_renderer.last_shadow_cache_misses;
+                point_shadow_lights = deferred_renderer.last_point_shadow_lights_rendered;
+                point_shadow_faces = deferred_renderer.last_point_shadow_faces_rendered;
+                sun_shadow_cascades = deferred_renderer.last_sun_shadow_cascades_rendered;
             } else {
                 visible_triangle_count = draw_runtime_world(
                     editor_world.runtime_world,
@@ -1522,18 +1781,14 @@ int main() {
 
         const Uint64 overlay_start_ticks = SDL_GetTicksNS();
         if (!benchmark.enabled && fps_counter_enabled) {
-            glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            glMatrixMode(GL_MODELVIEW);
-            glLoadIdentity();
+            core_set_identity_mvp();
+            core_set_identity_mvp();
             draw_fps_counter(displayed_fps, width, height);
         }
 
         if (!benchmark.enabled && profiler_enabled) {
-            glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            glMatrixMode(GL_MODELVIEW);
-            glLoadIdentity();
+            core_set_identity_mvp();
+            core_set_identity_mvp();
             ProfilerDisplay profiler_to_draw = displayed_profiler;
             profiler_to_draw.fps = displayed_fps;
             profiler_to_draw.total_triangles = static_cast<int>(editor_world.runtime_world.triangles.size());
@@ -1542,20 +1797,25 @@ int main() {
                 : visible_triangle_count;
             profiler_to_draw.sectors = static_cast<int>(editor_world.runtime_world.sectors.size());
             profiler_to_draw.walls = static_cast<int>(editor_world.runtime_world.walls.size());
+            profiler_to_draw.shadow_cache_hits = shadow_cache_hits;
+            profiler_to_draw.shadow_cache_misses = shadow_cache_misses;
+            profiler_to_draw.point_shadow_lights = point_shadow_lights;
+            profiler_to_draw.point_shadow_faces = point_shadow_faces;
+            profiler_to_draw.sun_shadow_cascades = sun_shadow_cascades;
             draw_profiler_overlay(profiler_to_draw, width, height, fps_counter_enabled ? 50.0F : 16.0F);
         }
+        if (!benchmark.enabled && effects_menu_open) {
+            core_set_identity_mvp();
+            draw_effects_menu(game_render_config, width, height);
+        }
         if (!benchmark.enabled && editor_3d_now) {
-            glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            glMatrixMode(GL_MODELVIEW);
-            glLoadIdentity();
+            core_set_identity_mvp();
+            core_set_identity_mvp();
             draw_material_selector(active_material, width, height);
         }
         if (!benchmark.enabled && is_editor_mode(app_mode)) {
-            glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            glMatrixMode(GL_MODELVIEW);
-            glLoadIdentity();
+            core_set_identity_mvp();
+            core_set_identity_mvp();
             float mouse_x = 0.0F;
             float mouse_y = 0.0F;
             SDL_GetMouseState(&mouse_x, &mouse_y);
@@ -1645,6 +1905,11 @@ int main() {
             displayed_profiler.visible_triangles = editor_2d_now ? 0 : visible_triangle_count;
             displayed_profiler.sectors = static_cast<int>(editor_world.runtime_world.sectors.size());
             displayed_profiler.walls = static_cast<int>(editor_world.runtime_world.walls.size());
+            displayed_profiler.shadow_cache_hits = shadow_cache_hits;
+            displayed_profiler.shadow_cache_misses = shadow_cache_misses;
+            displayed_profiler.point_shadow_lights = point_shadow_lights;
+            displayed_profiler.point_shadow_faces = point_shadow_faces;
+            displayed_profiler.sun_shadow_cascades = sun_shadow_cascades;
             profiler_accumulator = {};
         }
     }

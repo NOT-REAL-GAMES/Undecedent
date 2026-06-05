@@ -2,6 +2,8 @@
 
 #include <glad/glad.h>
 
+#include "undecedent/core_draw.hpp"
+
 namespace undecedent {
 
 float screen_to_ndc_x(const float screen_x, const int width) {
@@ -20,8 +22,8 @@ void draw_screen_line(
     const int width,
     const int height
 ) {
-    glVertex2f(screen_to_ndc_x(x0, width), screen_to_ndc_y(y0, height));
-    glVertex2f(screen_to_ndc_x(x1, width), screen_to_ndc_y(y1, height));
+    core_vertex2f(screen_to_ndc_x(x0, width), screen_to_ndc_y(y0, height));
+    core_vertex2f(screen_to_ndc_x(x1, width), screen_to_ndc_y(y1, height));
 }
 
 void draw_screen_quad(
@@ -32,10 +34,10 @@ void draw_screen_quad(
     const int width,
     const int height
 ) {
-    glVertex2f(screen_to_ndc_x(x, width), screen_to_ndc_y(y, height));
-    glVertex2f(screen_to_ndc_x(x + quad_width, width), screen_to_ndc_y(y, height));
-    glVertex2f(screen_to_ndc_x(x + quad_width, width), screen_to_ndc_y(y + quad_height, height));
-    glVertex2f(screen_to_ndc_x(x, width), screen_to_ndc_y(y + quad_height, height));
+    core_vertex2f(screen_to_ndc_x(x, width), screen_to_ndc_y(y, height));
+    core_vertex2f(screen_to_ndc_x(x + quad_width, width), screen_to_ndc_y(y, height));
+    core_vertex2f(screen_to_ndc_x(x + quad_width, width), screen_to_ndc_y(y + quad_height, height));
+    core_vertex2f(screen_to_ndc_x(x, width), screen_to_ndc_y(y + quad_height, height));
 }
 
 } // namespace undecedent

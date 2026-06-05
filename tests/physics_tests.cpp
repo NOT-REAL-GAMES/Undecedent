@@ -1,6 +1,7 @@
 #include "undecedent/csg.hpp"
 #include "undecedent/displacement.hpp"
 #include "undecedent/physics.hpp"
+#include "undecedent/triangulator.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -41,6 +42,21 @@ std::vector<SectorPlane> add(std::vector<SectorPlane> sectors, const PolygonLoop
         std::exit(EXIT_FAILURE);
     }
     return result.sectors;
+}
+
+SectorPlane make_sector(const PolygonLoop& outer, const float floor_height = 0.0F, const float height = 96.0F) {
+    SectorPlane sector;
+    sector.outer = outer;
+    sector.floor_height = floor_height;
+    sector.height = height;
+    const undecedent::TriangulationResult triangulated = undecedent::triangulate_polygon(sector.outer, sector.holes);
+    if (triangulated.status != undecedent::TriangulationStatus::Ok) {
+        std::cerr << "Triangulation failed: " << triangulated.message << '\n';
+        std::exit(EXIT_FAILURE);
+    }
+    sector.triangles = triangulated.triangles;
+    sector.edge_neighbors.assign(sector.outer.vertices.size(), -1);
+    return sector;
 }
 
 } // namespace
@@ -128,6 +144,30 @@ int main() {
         }
         const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
         expect(!undecedent::player_fits_at(world, Vec3{5, 3, 5}, config), "low displaced ceiling should block player");
+    }
+
+    {
+        std::vector<SectorPlane> sectors{
+            make_sector(loop({{0, 0}, {100, 0}, {100, 100}, {0, 100}}), 0.0F),
+            make_sector(loop({{40, 40}, {60, 40}, {60, 60}, {40, 60}}), 24.0F),
+        };
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        const PlayerPhysicsConfig nested_config{4.0F, 56.0F, 48.0F};
+        expect(
+            undecedent::player_fits_at(world, Vec3{50, 72, 50}, nested_config),
+            "player should fit on an elevated nested sector floor"
+        );
+        expect(
+            !undecedent::player_fits_at(world, Vec3{50, 71, 50}, nested_config),
+            "nested sector floor should not be bypassed by the enclosing sector"
+        );
+
+        PlayerPhysicsState state{Vec3{50, 72, 50}, -1};
+        state = undecedent::move_player(world, state, Vec3{0, -10, 0}, nested_config);
+        expect_near(state.position.y, 72.0F, 0.01F, "player should not fall through a nested sector floor");
+
+        state = undecedent::move_player(world, state, Vec3{20, 0, 0}, nested_config);
+        expect_near(state.position.x, 50.0F, 0.01F, "nested sector walls should block movement into the enclosing sector");
     }
 
     return EXIT_SUCCESS;

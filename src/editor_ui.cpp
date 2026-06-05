@@ -6,6 +6,8 @@
 
 #include <glad/glad.h>
 
+#include "undecedent/core_draw.hpp"
+
 #include <algorithm>
 #include <iostream>
 #include <string>
@@ -121,17 +123,17 @@ void draw_button_rect(
     const int height,
     const bool active = false
 ) {
-    glBegin(GL_QUADS);
-    glColor4f(active ? 0.18F : 0.0F, active ? 0.40F : 0.0F, active ? 0.34F : 0.0F, active ? 0.80F : 0.42F);
+    core_begin(kCoreQuads);
+    core_color4f(active ? 0.18F : 0.0F, active ? 0.40F : 0.0F, active ? 0.34F : 0.0F, active ? 0.80F : 0.42F);
     draw_screen_quad(x, y, w, h, width, height);
-    glEnd();
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, active ? 0.96F : 0.62F);
+    core_end();
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, active ? 0.96F : 0.62F);
     draw_screen_line(x, y, x + w, y, width, height);
     draw_screen_line(x + w, y, x + w, y + h, width, height);
     draw_screen_line(x + w, y + h, x, y + h, width, height);
     draw_screen_line(x, y + h, x, y, width, height);
-    glEnd();
+    core_end();
 }
 
 void draw_ui_text(
@@ -143,10 +145,10 @@ void draw_ui_text(
     const int height,
     const float alpha = 0.92F
 ) {
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, alpha);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, alpha);
     draw_stroke_text(label, x, y, size, width, height);
-    glEnd();
+    core_end();
 }
 
 bool inspector_step_click(
@@ -184,12 +186,12 @@ void draw_property_row(
     draw_ui_text(value, x + 92.0F, y + 7.0F, 4.8F, width, height);
     draw_button_rect(x + w - 58.0F, y + 2.0F, 22.0F, row_h - 4.0F, width, height);
     draw_button_rect(x + w - 30.0F, y + 2.0F, 22.0F, row_h - 4.0F, width, height);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     draw_screen_line(x + w - 52.0F, y + (row_h * 0.5F), x + w - 42.0F, y + (row_h * 0.5F), width, height);
     draw_screen_line(x + w - 24.0F, y + (row_h * 0.5F), x + w - 14.0F, y + (row_h * 0.5F), width, height);
     draw_screen_line(x + w - 19.0F, y + (row_h * 0.5F) - 5.0F, x + w - 19.0F, y + (row_h * 0.5F) + 5.0F, width, height);
-    glEnd();
+    core_end();
 }
 
 } // namespace
@@ -210,24 +212,24 @@ void draw_material_selector(const int active_material, const int width, const in
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glBegin(GL_QUADS);
-    glColor4f(0.0F, 0.0F, 0.0F, 0.40F);
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, 0.40F);
     draw_screen_quad(10.0F, y - 8.0F, box_width, swatch + 22.0F, width, height);
     for (int i = 0; i < kMaterialCount; ++i) {
         const MaterialColor color = material_color(i);
-        glColor4f(color.r, color.g, color.b, 0.94F);
+        core_color4f(color.r, color.g, color.b, 0.94F);
         draw_screen_quad(x + (static_cast<float>(i) * (swatch + gap)), y, swatch, swatch, width, height);
     }
-    glEnd();
+    core_end();
 
     glLineWidth(2.0F);
-    glBegin(GL_LINES);
+    core_begin(GL_LINES);
     for (int i = 0; i < kMaterialCount; ++i) {
         const float sx = x + (static_cast<float>(i) * (swatch + gap));
         if (i == active_material) {
-            glColor4f(0.95F, 0.98F, 0.72F, 0.98F);
+            core_color4f(0.95F, 0.98F, 0.72F, 0.98F);
         } else {
-            glColor4f(0.04F, 0.05F, 0.06F, 0.82F);
+            core_color4f(0.04F, 0.05F, 0.06F, 0.82F);
         }
         draw_screen_line(sx, y, sx + swatch, y, width, height);
         draw_screen_line(sx + swatch, y, sx + swatch, y + swatch, width, height);
@@ -235,7 +237,7 @@ void draw_material_selector(const int active_material, const int width, const in
         draw_screen_line(sx, y + swatch, sx, y, width, height);
         draw_stroke_text(std::to_string(i + 1), sx + 8.0F, y + swatch + 5.0F, 5.0F, width, height);
     }
-    glEnd();
+    core_end();
 
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
@@ -306,18 +308,18 @@ void draw_sculpt_button(
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBegin(GL_QUADS);
+    core_begin(kCoreQuads);
     if (editor_world.displacement_sculpt_enabled) {
-        glColor4f(0.18F, 0.42F, 0.38F, 0.82F);
+        core_color4f(0.18F, 0.42F, 0.38F, 0.82F);
     } else {
-        glColor4f(0.0F, 0.0F, 0.0F, 0.46F);
+        core_color4f(0.0F, 0.0F, 0.0F, 0.46F);
     }
     draw_screen_quad(x, y, w, h, width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(1.5F);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     draw_screen_line(x, y, x + w, y, width, height);
     draw_screen_line(x + w, y, x + w, y + h, width, height);
     draw_screen_line(x + w, y + h, x, y + h, width, height);
@@ -326,7 +328,7 @@ void draw_sculpt_button(
     draw_screen_line(x + 22.0F, y + 10.0F, x + 32.0F, y + 20.0F, width, height);
     draw_screen_line(x + 32.0F, y + 20.0F, x + 42.0F, y + 10.0F, width, height);
     draw_stroke_text("SCULPT", x + 52.0F, y + 9.0F, 5.5F, width, height);
-    glEnd();
+    core_end();
     glLineWidth(1.0F);
 
     if (point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
@@ -335,21 +337,21 @@ void draw_sculpt_button(
         const float tooltip_y = y + h + 8.0F;
         const float tooltip_w = 178.0F;
         const float tooltip_h = 44.0F;
-        glBegin(GL_QUADS);
-        glColor4f(0.0F, 0.0F, 0.0F, 0.72F);
+        core_begin(kCoreQuads);
+        core_color4f(0.0F, 0.0F, 0.0F, 0.72F);
         draw_screen_quad(tooltip_x, tooltip_y, tooltip_w, tooltip_h, width, height);
-        glEnd();
+        core_end();
 
         glLineWidth(1.25F);
-        glBegin(GL_LINES);
-        glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+        core_begin(GL_LINES);
+        core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
         draw_screen_line(tooltip_x, tooltip_y, tooltip_x + tooltip_w, tooltip_y, width, height);
         draw_screen_line(tooltip_x + tooltip_w, tooltip_y, tooltip_x + tooltip_w, tooltip_y + tooltip_h, width, height);
         draw_screen_line(tooltip_x + tooltip_w, tooltip_y + tooltip_h, tooltip_x, tooltip_y + tooltip_h, width, height);
         draw_screen_line(tooltip_x, tooltip_y + tooltip_h, tooltip_x, tooltip_y, width, height);
         draw_stroke_text("SCULPT DISPLACEMENT", tooltip_x + 8.0F, tooltip_y + 9.0F, 5.0F, width, height);
         draw_stroke_text(radius, tooltip_x + 8.0F, tooltip_y + 26.0F, 5.0F, width, height);
-        glEnd();
+        core_end();
         glLineWidth(1.0F);
     }
     glDisable(GL_BLEND);
@@ -372,14 +374,14 @@ void draw_subdivision_controls(const EditorWorld& editor_world, const int width,
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBegin(GL_QUADS);
-    glColor4f(0.0F, 0.0F, 0.0F, has_selection ? 0.50F : 0.28F);
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, has_selection ? 0.50F : 0.28F);
     draw_screen_quad(x, y, w, h, width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(1.5F);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, has_selection ? 0.92F : 0.38F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, has_selection ? 0.92F : 0.38F);
     draw_screen_line(x, y, x + w, y, width, height);
     draw_screen_line(x + w, y, x + w, y + h, width, height);
     draw_screen_line(x + w, y + h, x, y + h, width, height);
@@ -390,7 +392,7 @@ void draw_subdivision_controls(const EditorWorld& editor_world, const int width,
     draw_screen_line(x + 11.0F, y + 15.0F, x + 23.0F, y + 15.0F, width, height);
     draw_screen_line(x + w - 23.0F, y + 15.0F, x + w - 11.0F, y + 15.0F, width, height);
     draw_screen_line(x + w - 17.0F, y + 9.0F, x + w - 17.0F, y + 21.0F, width, height);
-    glEnd();
+    core_end();
 
     const std::string label = has_selection
         ? "SUBDIV " + std::to_string(subdivision)
@@ -448,17 +450,17 @@ void draw_entity_dropdown(const EditorWorld& editor_world, const int width, cons
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBegin(GL_QUADS);
-    glColor4f(0.0F, 0.0F, 0.0F, 0.46F);
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, 0.46F);
     draw_screen_quad(x, y, w, row_h, width, height);
     if (editor_world.entity_dropdown_open) {
         draw_screen_quad(x, y + row_h, w, row_h * 2.0F, width, height);
     }
-    glEnd();
+    core_end();
 
     glLineWidth(1.5F);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, 0.92F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     draw_screen_line(x, y, x + w, y, width, height);
     draw_screen_line(x + w, y, x + w, y + row_h, width, height);
     draw_screen_line(x + w, y + row_h, x, y + row_h, width, height);
@@ -472,7 +474,7 @@ void draw_entity_dropdown(const EditorWorld& editor_world, const int width, cons
         draw_stroke_text("PLAYER SPAWN", x + 10.0F, y + row_h + 8.0F, 5.5F, width, height);
         draw_stroke_text("POINT LIGHT", x + 10.0F, y + (row_h * 2.0F) + 8.0F, 5.5F, width, height);
     }
-    glEnd();
+    core_end();
     glLineWidth(1.0F);
     glDisable(GL_BLEND);
 }
@@ -594,19 +596,19 @@ void draw_entity_inspector(const EditorWorld& editor_world, const int width, con
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBegin(GL_QUADS);
-    glColor4f(0.0F, 0.0F, 0.0F, 0.44F);
+    core_begin(kCoreQuads);
+    core_color4f(0.0F, 0.0F, 0.0F, 0.44F);
     draw_screen_quad(x, y, w, h, width, height);
-    glEnd();
+    core_end();
 
     glLineWidth(1.5F);
-    glBegin(GL_LINES);
-    glColor4f(0.90F, 0.96F, 0.76F, 0.88F);
+    core_begin(GL_LINES);
+    core_color4f(0.90F, 0.96F, 0.76F, 0.88F);
     draw_screen_line(x, y, x + w, y, width, height);
     draw_screen_line(x + w, y, x + w, y + h, width, height);
     draw_screen_line(x + w, y + h, x, y + h, width, height);
     draw_screen_line(x, y + h, x, y, width, height);
-    glEnd();
+    core_end();
 
     draw_ui_text("INSPECTOR", x + 8.0F, y + 10.0F, 5.4F, width, height);
     const float selector_y = y + 32.0F;
@@ -720,17 +722,17 @@ void draw_translation_gizmo(
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glLineWidth(3.0F);
-    glBegin(GL_LINES);
-    glColor4f(0.95F, 0.24F, 0.22F, 0.98F);
-    glVertex3f(origin.x, origin.y, origin.z);
-    glVertex3f(origin.x + 72.0F, origin.y, origin.z);
-    glColor4f(0.26F, 0.95F, 0.38F, 0.98F);
-    glVertex3f(origin.x, origin.y, origin.z);
-    glVertex3f(origin.x, origin.y + 72.0F, origin.z);
-    glColor4f(0.30F, 0.50F, 1.0F, 0.98F);
-    glVertex3f(origin.x, origin.y, origin.z);
-    glVertex3f(origin.x, origin.y, origin.z + 72.0F);
-    glEnd();
+    core_begin(GL_LINES);
+    core_color4f(0.95F, 0.24F, 0.22F, 0.98F);
+    core_vertex3f(origin.x, origin.y, origin.z);
+    core_vertex3f(origin.x + 72.0F, origin.y, origin.z);
+    core_color4f(0.26F, 0.95F, 0.38F, 0.98F);
+    core_vertex3f(origin.x, origin.y, origin.z);
+    core_vertex3f(origin.x, origin.y + 72.0F, origin.z);
+    core_color4f(0.30F, 0.50F, 1.0F, 0.98F);
+    core_vertex3f(origin.x, origin.y, origin.z);
+    core_vertex3f(origin.x, origin.y, origin.z + 72.0F);
+    core_end();
     glLineWidth(1.0F);
 }
 

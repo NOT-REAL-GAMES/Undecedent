@@ -22,6 +22,7 @@ find_package(OpenGL REQUIRED)
 
 add_executable(Undecedent
     main.cpp
+    src/core_draw.cpp
     src/csg.cpp
     src/debug_draw.cpp
     src/deferred_renderer.cpp
@@ -41,6 +42,7 @@ add_executable(Undecedent
     src/runtime_visibility.cpp
     src/runtime_world.cpp
     src/screen_draw.cpp
+    src/shadow_cache.cpp
     src/shadow_atlas.cpp
     src/sdl_platform.cpp
     src/triangulator.cpp
@@ -138,6 +140,7 @@ target_include_directories(UndecedentMaterialsTests PRIVATE include)
 
 add_executable(UndecedentShadowAtlasTests
     tests/shadow_atlas_tests.cpp
+    src/shadow_cache.cpp
     src/shadow_atlas.cpp
 )
 
@@ -145,6 +148,7 @@ target_include_directories(UndecedentShadowAtlasTests PRIVATE include)
 
 add_executable(UndecedentEditorEntityTests
     tests/editor_entity_tests.cpp
+    src/core_draw.cpp
     src/csg.cpp
     src/displacement.cpp
     src/editor.cpp

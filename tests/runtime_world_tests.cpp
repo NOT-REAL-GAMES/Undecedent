@@ -3,6 +3,7 @@
 #include "undecedent/runtime_render.hpp"
 #include "undecedent/runtime_visibility.hpp"
 #include "undecedent/runtime_world.hpp"
+#include "undecedent/triangulator.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -34,6 +35,19 @@ std::vector<SectorPlane> add(std::vector<SectorPlane> sectors, const PolygonLoop
         std::exit(EXIT_FAILURE);
     }
     return result.sectors;
+}
+
+SectorPlane sector_from_loop(const PolygonLoop& outer) {
+    SectorPlane sector;
+    sector.outer = outer;
+    const undecedent::TriangulationResult result = undecedent::triangulate_polygon(sector.outer, sector.holes);
+    if (result.status != undecedent::TriangulationStatus::Ok) {
+        std::cerr << "Triangulation failed: " << result.message << '\n';
+        std::exit(EXIT_FAILURE);
+    }
+    sector.triangles = result.triangles;
+    sector.edge_neighbors.assign(sector.outer.vertices.size(), -1);
+    return sector;
 }
 
 bool contains(const std::vector<int>& values, const int value) {
@@ -113,6 +127,39 @@ int main() {
     }
 
     {
+        std::vector<SectorPlane> sectors{
+            sector_from_loop(loop({{0, 0}, {40, 0}, {40, 40}, {0, 40}})),
+            sector_from_loop(loop({{14, 14}, {26, 14}, {26, 26}, {14, 26}})),
+        };
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        expect(contains(world.sectors[0].overlap_visibility_ids, 1),
+            "outer sector should have a visibility link to contained sector");
+        expect(contains(world.sectors[1].overlap_visibility_ids, 0),
+            "contained sector should have a visibility link to outer sector");
+        expect(undecedent::sector_at_point(world, Vec3{20, 48, 20}) == 1,
+            "point lookup should prefer the smaller contained sector");
+        const std::vector<int> visible = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(8.0F, 48.0F, 8.0F, -0.7853982F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(contains(visible, 0) && contains(visible, 1),
+            "portal culling should keep contained sectors visible from the containing sector");
+        const std::vector<int> visible_from_inner = undecedent::visible_sectors_from_camera(
+            world,
+            camera_at(20.0F, 48.0F, 20.0F, -0.7853982F),
+            undecedent::GameRenderConfig{},
+            1280,
+            720
+        );
+        expect(contains(visible_from_inner, 1), "portal culling should keep the contained camera sector");
+        expect(!contains(visible_from_inner, 0),
+            "contained sectors should not use overlap visibility to flood into their enclosing sector");
+    }
+
+    {
         std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
         sectors.front().floor_height = 16.0F;
         sectors.front().height = 32.0F;
@@ -147,6 +194,22 @@ int main() {
             "nearby sector point query should return containing cell sector candidates");
         expect(!undecedent::walls_near_point(world, Vec3{0, 0, 0}).empty(),
             "nearby wall point query should return wall candidates");
+    }
+
+    {
+        constexpr float huge = 10000000.0F;
+        std::vector<SectorPlane> sectors{
+            sector_from_loop(loop({{-huge, -huge}, {huge, -huge}, {huge, huge}, {-huge, huge}})),
+        };
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        expect(world.spatial_cells.size() < 64, "huge sectors should not populate millions of spatial cells");
+        expect(contains(world.unindexed_sector_ids, 0), "huge sectors should be kept in the unindexed sector fallback");
+        expect(undecedent::sector_at_point(world, Vec3{0, 48, 0}) == 0,
+            "point lookup should still find an unindexed huge sector");
+        expect(contains(undecedent::sectors_near_point(world, Vec3{0, 48, 0}), 0),
+            "nearby queries should include unindexed huge sectors");
+        expect(contains(undecedent::sectors_in_bounds(world, {-huge, -huge, huge, huge}), 0),
+            "large bounds queries should fall back to all sectors without scanning every cell");
     }
 
     {

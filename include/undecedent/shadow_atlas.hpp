@@ -17,6 +17,9 @@ constexpr int kPointShadowAtlasMinTileCount =
 constexpr int kMaxDeferredPointLights = 4096;
 constexpr int kMaxPointShadowedLights = 512;
 constexpr int kSunShadowResolution = 2048;
+constexpr int kSunShadowCascadeCount = 4;
+constexpr int kSunShadowCascadeGrid = 2;
+constexpr int kSunShadowAtlasSize = kSunShadowResolution * kSunShadowCascadeGrid;
 
 struct ShadowAtlasRect {
     int x = 0;
