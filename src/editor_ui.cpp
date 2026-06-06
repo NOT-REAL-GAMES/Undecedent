@@ -227,7 +227,7 @@ void draw_material_selector(const int active_material, const int width, const in
     }
     core_end();
 
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     core_begin(GL_LINES);
     for (int i = 0; i < kMaterialCount; ++i) {
         const float sx = x + (static_cast<float>(i) * (swatch + gap));
@@ -248,7 +248,7 @@ void draw_material_selector(const int active_material, const int width, const in
         draw_ui_text(std::to_string(i + 1), sx + 7.0F, y + swatch + 4.0F, 5.0F, width, height);
     }
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -326,7 +326,7 @@ void draw_sculpt_button(
     draw_screen_quad(x, y, w, h, width, height);
     core_end();
 
-    glLineWidth(1.5F);
+    core_set_line_width(1.5F);
     core_begin(GL_LINES);
     core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     draw_screen_line(x, y, x + w, y, width, height);
@@ -338,7 +338,7 @@ void draw_sculpt_button(
     draw_screen_line(x + 32.0F, y + 20.0F, x + 42.0F, y + 10.0F, width, height);
     core_end();
     draw_ui_text("SCULPT", x + 52.0F, y + 8.0F, 5.5F, width, height);
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
 
     if (point_in_rect(mouse_x, mouse_y, x, y, w, h)) {
         const std::string radius = "R " + format_world_units(editor_world.displacement_brush_radius) + "U";
@@ -351,7 +351,7 @@ void draw_sculpt_button(
         draw_screen_quad(tooltip_x, tooltip_y, tooltip_w, tooltip_h, width, height);
         core_end();
 
-        glLineWidth(1.25F);
+        core_set_line_width(1.25F);
         core_begin(GL_LINES);
         core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
         draw_screen_line(tooltip_x, tooltip_y, tooltip_x + tooltip_w, tooltip_y, width, height);
@@ -361,7 +361,7 @@ void draw_sculpt_button(
         core_end();
         draw_ui_text("SCULPT DISPLACEMENT", tooltip_x + 8.0F, tooltip_y + 8.0F, 5.0F, width, height);
         draw_ui_text(radius, tooltip_x + 8.0F, tooltip_y + 25.0F, 5.0F, width, height);
-        glLineWidth(1.0F);
+        core_set_line_width(1.0F);
     }
     glDisable(GL_BLEND);
 }
@@ -388,7 +388,7 @@ void draw_subdivision_controls(const EditorWorld& editor_world, const int width,
     draw_screen_quad(x, y, w, h, width, height);
     core_end();
 
-    glLineWidth(1.5F);
+    core_set_line_width(1.5F);
     core_begin(GL_LINES);
     core_color4f(0.90F, 0.96F, 0.76F, has_selection ? 0.92F : 0.38F);
     draw_screen_line(x, y, x + w, y, width, height);
@@ -407,7 +407,7 @@ void draw_subdivision_controls(const EditorWorld& editor_world, const int width,
         ? "SUBDIV " + std::to_string(subdivision)
         : "SUBDIV -";
     draw_ui_text(label, x + 46.0F, y + 8.0F, 5.5F, width, height);
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -467,7 +467,7 @@ void draw_entity_dropdown(const EditorWorld& editor_world, const int width, cons
     }
     core_end();
 
-    glLineWidth(1.5F);
+    core_set_line_width(1.5F);
     core_begin(GL_LINES);
     core_color4f(0.90F, 0.96F, 0.76F, 0.92F);
     draw_screen_line(x, y, x + w, y, width, height);
@@ -486,7 +486,7 @@ void draw_entity_dropdown(const EditorWorld& editor_world, const int width, cons
         draw_ui_text("PLAYER SPAWN", x + 10.0F, y + row_h + 7.0F, 5.5F, width, height);
         draw_ui_text("POINT LIGHT", x + 10.0F, y + (row_h * 2.0F) + 7.0F, 5.5F, width, height);
     }
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -613,7 +613,7 @@ void draw_entity_inspector(const EditorWorld& editor_world, const int width, con
     draw_screen_quad(x, y, w, h, width, height);
     core_end();
 
-    glLineWidth(1.5F);
+    core_set_line_width(1.5F);
     core_begin(GL_LINES);
     core_color4f(0.90F, 0.96F, 0.76F, 0.88F);
     draw_screen_line(x, y, x + w, y, width, height);
@@ -714,7 +714,7 @@ void draw_entity_inspector(const EditorWorld& editor_world, const int width, con
         break;
     }
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -733,7 +733,7 @@ void draw_translation_gizmo(
     set_game_projection(width, height, camera, config);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
-    glLineWidth(3.0F);
+    core_set_line_width(3.0F);
     core_begin(GL_LINES);
     core_color4f(0.95F, 0.24F, 0.22F, 0.98F);
     core_vertex3f(origin.x, origin.y, origin.z);
@@ -745,7 +745,7 @@ void draw_translation_gizmo(
     core_vertex3f(origin.x, origin.y, origin.z);
     core_vertex3f(origin.x, origin.y, origin.z + 72.0F);
     core_end();
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
 }
 
 } // namespace undecedent

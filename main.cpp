@@ -46,7 +46,10 @@
 namespace {
 using undecedent::core_begin;
 using undecedent::core_color4f;
+using undecedent::core_draw_begin_frame;
+using undecedent::core_draw_flush;
 using undecedent::core_end;
+using undecedent::core_set_line_width;
 using undecedent::core_set_identity_mvp;
 using undecedent::draw_screen_line;
 using undecedent::draw_screen_quad;
@@ -67,6 +70,8 @@ using undecedent::draw_subdivision_controls;
 using undecedent::draw_translation_gizmo;
 using undecedent::screen_to_ndc_x;
 using undecedent::screen_to_ndc_y;
+using undecedent::sdf_text_begin_frame;
+using undecedent::sdf_text_flush;
 using undecedent::sdf_text_shutdown;
 using undecedent::configure_gl_attributes;
 using undecedent::log_sdl_error;
@@ -1142,10 +1147,10 @@ void draw_fps_counter(const int fps, const int width, const int height) {
     draw_screen_quad(10.0F, 10.0F, box_width, box_height, width, height);
     core_end();
 
-    glLineWidth(1.5F);
+    core_set_line_width(1.5F);
     draw_overlay_text(label, x, y, size, width, height);
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -1194,12 +1199,12 @@ void draw_profiler_overlay(
     draw_screen_quad(10.0F, top_y - 6.0F, 286.0F, 12.0F + line_height * static_cast<float>(lines.size()), width, height);
     core_end();
 
-    glLineWidth(1.35F);
+    core_set_line_width(1.35F);
     for (std::size_t i = 0; i < lines.size(); ++i) {
         draw_overlay_text(lines[i], x, top_y + static_cast<float>(i) * line_height, size, width, height);
     }
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -1229,7 +1234,7 @@ void draw_effects_menu(const GameRenderConfig& config, const PresentConfig& pres
     draw_screen_quad(layout.x, layout.y, layout.w, layout.h, width, height);
     core_end();
 
-    glLineWidth(1.5F);
+    core_set_line_width(1.5F);
     core_begin(GL_LINES);
     core_color4f(0.90F, 0.96F, 0.76F, 0.96F);
     draw_screen_rect_outline(layout.x, layout.y, layout.w, layout.h, width, height);
@@ -1259,7 +1264,7 @@ void draw_effects_menu(const GameRenderConfig& config, const PresentConfig& pres
         draw_overlay_text(rows[i].value, toggle_x + 6.0F, row_y + 10.0F, 4.8F, width, height, 0.95F);
     }
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -2311,6 +2316,8 @@ int main() {
         int width = 0;
         int height = 0;
         SDL_GetWindowSizeInPixels(window, &width, &height);
+        core_draw_begin_frame(width, height);
+        sdf_text_begin_frame();
         if (editor_2d_now) {
             float mouse_x = 0.0F;
             float mouse_y = 0.0F;
@@ -2391,6 +2398,8 @@ int main() {
                 draw_translation_gizmo(editor_world, width, height, game_camera, game_render_config);
             }
         }
+        core_draw_flush();
+        sdf_text_flush();
         render_ms = ticks_to_ms(render_start_ticks, SDL_GetTicksNS());
 
         const Uint64 overlay_start_ticks = SDL_GetTicksNS();
@@ -2440,6 +2449,8 @@ int main() {
             draw_script_quick_buttons(editor_world, width, height);
             draw_script_editor_workspace(editor_world, width, height);
         }
+        core_draw_flush();
+        sdf_text_flush();
         overlay_ms = ticks_to_ms(overlay_start_ticks, SDL_GetTicksNS());
 
         if (profiler_finish_diagnostic_enabled) {

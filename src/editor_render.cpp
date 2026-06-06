@@ -48,7 +48,7 @@ void draw_editor_grid(
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
 
     const float grid_step = editor_grid_world_step(camera.zoom);
     const float min_world_x = screen_to_world_x(0.0F, width, camera);
@@ -160,7 +160,7 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
     }
     core_end();
 
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     for (std::size_t i = 0; i < editor_world.sectors.size(); ++i) {
         if (!sector_visible_in_slice(editor_world, editor_world.sectors[i])) {
             continue;
@@ -217,7 +217,7 @@ void draw_sector_planes(const EditorWorld& editor_world, const int width, const 
     }
     core_end();
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -249,7 +249,7 @@ void draw_draft_plane(const EditorWorld& editor_world, const int width, const in
         core_end();
     }
 
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     core_begin(GL_LINE_STRIP);
     core_color4f(red, green, blue, 0.92F);
     for (const Vec2 vertex : editor_world.draft_vertices) {
@@ -277,7 +277,7 @@ void draw_draft_plane(const EditorWorld& editor_world, const int width, const in
     draw_vertex_marker(editor_world.snapped_mouse, width, height, camera, red, green, blue, 0.55F);
     core_end();
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -308,7 +308,7 @@ void draw_scale_indicator(
     draw_screen_quad(10.0F, static_cast<float>(height) - 88.0F, std::max(bar_pixels + 34.0F, 112.0F), 76.0F, width, height);
     core_end();
 
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     core_begin(GL_LINES);
     core_color4f(0.90F, 0.96F, 0.76F, 0.88F);
     draw_screen_line(origin_x, origin_y, origin_x + bar_pixels, origin_y, width, height);
@@ -316,7 +316,7 @@ void draw_scale_indicator(
     draw_screen_line(origin_x + bar_pixels, origin_y - 7.0F, origin_x + bar_pixels, origin_y + 7.0F, width, height);
     core_end();
 
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     if (!draw_sdf_text(label, origin_x, label_y - 1.0F, 15.4F, width, height)) {
         core_begin(GL_LINES);
         core_color4f(1.0F, 1.0F, 1.0F, 0.92F);
@@ -357,7 +357,7 @@ void draw_player_spawn_2d(
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     core_color4f(1.0F, 0.82F, 0.25F, 0.95F);
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     core_begin(GL_LINES);
     draw_screen_line(x - 10.0F, y, x + 10.0F, y, width, height);
     draw_screen_line(x, y - 10.0F, x, y + 10.0F, width, height);
@@ -365,7 +365,7 @@ void draw_player_spawn_2d(
     const float facing_y = y - std::cos(spawn.yaw) * 18.0F;
     draw_screen_line(x, y, facing_x, facing_y, width, height);
     core_end();
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -379,7 +379,7 @@ void draw_point_lights_2d(const EditorWorld& editor_world, const int width, cons
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     core_begin(GL_LINES);
     core_color4f(1.0F, 0.86F, 0.35F, 0.92F);
     for (const PointLight& light : point_lights) {
@@ -394,7 +394,7 @@ void draw_point_lights_2d(const EditorWorld& editor_world, const int width, cons
         draw_screen_line(x - 5.0F, y + 5.0F, x + 5.0F, y - 5.0F, width, height);
     }
     core_end();
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 

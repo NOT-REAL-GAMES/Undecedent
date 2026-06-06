@@ -47,6 +47,7 @@ struct SdfTextState {
     std::filesystem::path metrics_path;
     std::filesystem::path atlas_path;
     std::unordered_map<int, SdfGlyph> glyphs;
+    std::vector<SdfVertex> pending_vertices;
     float font_size = 48.0F;
     float spread = 8.0F;
     float ascent = 0.0F;
@@ -331,6 +332,52 @@ void sdf_text_shutdown() {
     text = {};
 }
 
+void sdf_text_begin_frame() {
+    state().pending_vertices.clear();
+}
+
+void sdf_text_flush() {
+    SdfTextState& text = state();
+    if (text.pending_vertices.empty()) {
+        return;
+    }
+    if (!ensure_renderer()) {
+        text.pending_vertices.clear();
+        return;
+    }
+
+    glUseProgram(text.program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, text.texture);
+    glUniform1i(text.atlas_uniform, 0);
+    glBindVertexArray(text.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, text.vbo);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(text.pending_vertices.size() * sizeof(SdfVertex)),
+        text.pending_vertices.data(),
+        GL_STREAM_DRAW
+    );
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(SdfVertex), reinterpret_cast<const void*>(offsetof(SdfVertex, x)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(SdfVertex), reinterpret_cast<const void*>(offsetof(SdfVertex, u)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SdfVertex), reinterpret_cast<const void*>(offsetof(SdfVertex, r)));
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(text.pending_vertices.size()));
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    text.pending_vertices.clear();
+}
+
 bool load_sdf_text_font(const std::string& metrics_path) {
     SdfTextState& text = state();
     std::ifstream input(metrics_path);
@@ -446,8 +493,9 @@ bool draw_sdf_text(
     const SdfGlyph* space = glyph_for_char(' ');
     const float tab_advance = (space != nullptr ? space->advance : text.font_size * 0.5F) * scale * 4.0F;
 
-    std::vector<SdfVertex> vertices;
-    vertices.reserve(text_value.size() * 6U);
+    SdfTextState& mutable_text = state();
+    std::vector<SdfVertex>& vertices = mutable_text.pending_vertices;
+    vertices.reserve(vertices.size() + text_value.size() * 6U);
     float cursor_x = x;
     float cursor_y = y;
     for (const char ch : text_value) {
@@ -489,44 +537,6 @@ bool draw_sdf_text(
             SdfVertex{x0, y1, u0, v1, color.r, color.g, color.b, color.a},
         }});
     }
-    if (vertices.empty()) {
-        return true;
-    }
-
-    GLint previous_program = 0;
-    glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
-    GLint previous_texture = 0;
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
-
-    glUseProgram(text.program);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, text.texture);
-    glUniform1i(text.atlas_uniform, 0);
-    glBindVertexArray(text.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, text.vbo);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(SdfVertex)),
-        vertices.data(),
-        GL_STREAM_DRAW
-    );
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(SdfVertex), reinterpret_cast<const void*>(offsetof(SdfVertex, x)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(SdfVertex), reinterpret_cast<const void*>(offsetof(SdfVertex, u)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SdfVertex), reinterpret_cast<const void*>(offsetof(SdfVertex, r)));
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
-    glDisableVertexAttribArray(2);
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous_texture));
-    glUseProgram(static_cast<GLuint>(previous_program));
     return true;
 }
 

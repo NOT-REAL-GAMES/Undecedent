@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iostream>
 #include <vector>
 
@@ -25,8 +26,17 @@ struct CoreDrawState {
     GLint mvp_uniform = -1;
     std::array<float, 16> mvp{};
     std::array<float, 4> color{1.0F, 1.0F, 1.0F, 1.0F};
+    float line_width = 1.0F;
     GLenum mode = 0;
     std::vector<CoreVertex> submitted;
+    struct Batch {
+        GLenum primitive = GL_TRIANGLES;
+        std::array<float, 16> mvp{};
+        std::vector<CoreVertex> vertices;
+    };
+    std::vector<Batch> batches;
+    int screen_width = 1;
+    int screen_height = 1;
     bool initialized = false;
     bool failed = false;
 };
@@ -188,6 +198,26 @@ void append_converted_vertices(std::vector<CoreVertex>& out, const GLenum mode, 
     }
 }
 
+std::size_t converted_vertex_count(const GLenum mode, const std::size_t submitted_vertex_count) {
+    switch (mode) {
+        case GL_LINES:
+        case GL_TRIANGLES:
+            return submitted_vertex_count;
+        case GL_LINE_STRIP:
+            return submitted_vertex_count >= 2 ? (submitted_vertex_count - 1) * 2 : 0;
+        case GL_LINE_LOOP:
+            return submitted_vertex_count >= 2 ? submitted_vertex_count * 2 : 0;
+        case kCoreQuads:
+            return (submitted_vertex_count / 4) * 6;
+        default:
+            return 0;
+    }
+}
+
+bool is_identity_matrix(const std::array<float, 16>& matrix) {
+    return matrix == identity_matrix();
+}
+
 GLenum converted_primitive(const GLenum mode) {
     if (mode == GL_LINE_STRIP || mode == GL_LINE_LOOP) {
         return GL_LINES;
@@ -196,6 +226,86 @@ GLenum converted_primitive(const GLenum mode) {
         return GL_TRIANGLES;
     }
     return mode;
+}
+
+void append_thick_ndc_line(
+    std::vector<CoreVertex>& out,
+    const CoreVertex& a,
+    const CoreVertex& b,
+    const float line_width,
+    const int screen_width,
+    const int screen_height
+) {
+    const float dx_pixels = (b.x - a.x) * 0.5F * static_cast<float>(screen_width);
+    const float dy_pixels = (b.y - a.y) * -0.5F * static_cast<float>(screen_height);
+    const float length = std::sqrt(dx_pixels * dx_pixels + dy_pixels * dy_pixels);
+    if (length <= 0.0001F) {
+        return;
+    }
+
+    const float nx_pixels = -dy_pixels / length;
+    const float ny_pixels = dx_pixels / length;
+    const float half_width = std::max(1.0F, line_width) * 0.5F;
+    const float ox = nx_pixels * half_width * 2.0F / static_cast<float>(std::max(1, screen_width));
+    const float oy = -ny_pixels * half_width * 2.0F / static_cast<float>(std::max(1, screen_height));
+
+    const CoreVertex a0{a.x - ox, a.y - oy, a.z, a.r, a.g, a.b, a.a};
+    const CoreVertex a1{a.x + ox, a.y + oy, a.z, a.r, a.g, a.b, a.a};
+    const CoreVertex b0{b.x - ox, b.y - oy, b.z, b.r, b.g, b.b, b.a};
+    const CoreVertex b1{b.x + ox, b.y + oy, b.z, b.r, b.g, b.b, b.a};
+    out.push_back(a0);
+    out.push_back(b0);
+    out.push_back(b1);
+    out.push_back(a0);
+    out.push_back(b1);
+    out.push_back(a1);
+}
+
+void append_screen_line_triangles(
+    std::vector<CoreVertex>& out,
+    const GLenum mode,
+    const std::vector<CoreVertex>& in,
+    const float line_width,
+    const int screen_width,
+    const int screen_height
+) {
+    switch (mode) {
+        case GL_LINES:
+            for (std::size_t i = 0; i + 1 < in.size(); i += 2) {
+                append_thick_ndc_line(out, in[i], in[i + 1], line_width, screen_width, screen_height);
+            }
+            break;
+        case GL_LINE_STRIP:
+            for (std::size_t i = 1; i < in.size(); ++i) {
+                append_thick_ndc_line(out, in[i - 1], in[i], line_width, screen_width, screen_height);
+            }
+            break;
+        case GL_LINE_LOOP:
+            if (in.size() >= 2) {
+                for (std::size_t i = 1; i < in.size(); ++i) {
+                    append_thick_ndc_line(out, in[i - 1], in[i], line_width, screen_width, screen_height);
+                }
+                append_thick_ndc_line(out, in.back(), in.front(), line_width, screen_width, screen_height);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+bool is_line_primitive(const GLenum mode) {
+    return mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP;
+}
+
+CoreDrawState::Batch& append_batch(CoreDrawState& draw, const GLenum primitive, const std::array<float, 16>& mvp) {
+    if (!draw.batches.empty()) {
+        CoreDrawState::Batch& last = draw.batches.back();
+        if (last.primitive == primitive && last.mvp == mvp) {
+            return last;
+        }
+    }
+    draw.batches.push_back(CoreDrawState::Batch{primitive, mvp, {}});
+    return draw.batches.back();
 }
 
 void bind_core_vertex_layout(
@@ -240,12 +350,65 @@ void core_draw_shutdown() {
     draw = {};
 }
 
+void core_draw_begin_frame(const int screen_width, const int screen_height) {
+    CoreDrawState& draw = state();
+    draw.screen_width = std::max(1, screen_width);
+    draw.screen_height = std::max(1, screen_height);
+    draw.submitted.clear();
+    draw.batches.clear();
+    draw.mode = 0;
+}
+
+void core_draw_flush() {
+    CoreDrawState& draw = state();
+    if (draw.batches.empty() || !ensure_core_draw()) {
+        draw.batches.clear();
+        return;
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(draw.program);
+    glBindVertexArray(draw.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, draw.vbo);
+    bind_core_vertex_layout(sizeof(CoreVertex), offsetof(CoreVertex, x), offsetof(CoreVertex, r), 4);
+
+    for (const CoreDrawState::Batch& batch : draw.batches) {
+        if (batch.vertices.empty()) {
+            continue;
+        }
+        glUniformMatrix4fv(draw.mvp_uniform, 1, GL_FALSE, batch.mvp.data());
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(batch.vertices.size() * sizeof(CoreVertex)),
+            batch.vertices.data(),
+            GL_STREAM_DRAW
+        );
+        if (batch.primitive == GL_LINES) {
+            glLineWidth(std::max(1.0F, draw.line_width));
+        }
+        glDrawArrays(batch.primitive, 0, static_cast<GLsizei>(batch.vertices.size()));
+    }
+
+    glLineWidth(1.0F);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+    draw.batches.clear();
+}
+
 void core_set_identity_mvp() {
     state().mvp = identity_matrix();
 }
 
 void core_set_mvp(const std::array<float, 16>& matrix) {
     state().mvp = matrix;
+}
+
+void core_set_line_width(const float width) {
+    state().line_width = std::max(1.0F, width);
 }
 
 void core_begin(const GLenum mode) {
@@ -269,36 +432,37 @@ void core_vertex3f(const float x, const float y, const float z) {
 
 void core_end() {
     CoreDrawState& draw = state();
-    if (draw.submitted.empty() || !ensure_core_draw()) {
+    if (draw.submitted.empty()) {
         draw.submitted.clear();
         return;
     }
 
     std::vector<CoreVertex> vertices;
-    vertices.reserve(draw.submitted.size() * 2);
-    append_converted_vertices(vertices, draw.mode, draw.submitted);
+    GLenum primitive = converted_primitive(draw.mode);
+    std::array<float, 16> mvp = draw.mvp;
+    if (is_identity_matrix(draw.mvp) && is_line_primitive(draw.mode) && draw.line_width > 1.0F) {
+        primitive = GL_TRIANGLES;
+        mvp = identity_matrix();
+        vertices.reserve(draw.submitted.size() * 6);
+        append_screen_line_triangles(
+            vertices,
+            draw.mode,
+            draw.submitted,
+            draw.line_width,
+            draw.screen_width,
+            draw.screen_height
+        );
+    } else {
+        vertices.reserve(draw.submitted.size() * 2);
+        append_converted_vertices(vertices, draw.mode, draw.submitted);
+    }
     draw.submitted.clear();
     if (vertices.empty()) {
         return;
     }
 
-    glUseProgram(draw.program);
-    glUniformMatrix4fv(draw.mvp_uniform, 1, GL_FALSE, draw.mvp.data());
-    glBindVertexArray(draw.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, draw.vbo);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(CoreVertex)),
-        vertices.data(),
-        GL_STREAM_DRAW
-    );
-    bind_core_vertex_layout(sizeof(CoreVertex), offsetof(CoreVertex, x), offsetof(CoreVertex, r), 4);
-    glDrawArrays(converted_primitive(draw.mode), 0, static_cast<GLsizei>(vertices.size()));
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    glUseProgram(0);
+    CoreDrawState::Batch& batch = append_batch(draw, primitive, mvp);
+    batch.vertices.insert(batch.vertices.end(), vertices.begin(), vertices.end());
 }
 
 void core_draw_colored_arrays(
@@ -320,12 +484,50 @@ void core_draw_colored_arrays(
     glBindVertexArray(draw.vao);
     glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
     bind_core_vertex_layout(stride, position_offset, color_offset, color_components);
+    if (primitive == GL_LINES) {
+        glLineWidth(std::max(1.0F, draw.line_width));
+    }
     glDrawArrays(primitive, first_vertex, vertex_count);
+    glLineWidth(1.0F);
     glDisableVertexAttribArray(1);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     glUseProgram(0);
+}
+
+CoreDrawStats core_draw_pending_stats() {
+    const CoreDrawState& draw = state();
+    CoreDrawStats stats;
+    stats.batches = static_cast<int>(draw.batches.size());
+    for (const CoreDrawState::Batch& batch : draw.batches) {
+        stats.vertices += static_cast<int>(batch.vertices.size());
+    }
+    return stats;
+}
+
+std::size_t core_debug_converted_vertex_count(const GLenum mode, const std::size_t submitted_vertex_count) {
+    return converted_vertex_count(mode, submitted_vertex_count);
+}
+
+std::size_t core_debug_screen_line_triangle_count(
+    const GLenum mode,
+    const std::size_t submitted_vertex_count,
+    const float line_width
+) {
+    if (!is_line_primitive(mode) || line_width <= 1.0F) {
+        return 0;
+    }
+    switch (mode) {
+        case GL_LINES:
+            return (submitted_vertex_count / 2) * 6;
+        case GL_LINE_STRIP:
+            return submitted_vertex_count >= 2 ? (submitted_vertex_count - 1) * 6 : 0;
+        case GL_LINE_LOOP:
+            return submitted_vertex_count >= 2 ? submitted_vertex_count * 6 : 0;
+        default:
+            return 0;
+    }
 }
 
 } // namespace undecedent

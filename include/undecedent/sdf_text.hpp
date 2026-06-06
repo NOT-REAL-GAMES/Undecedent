@@ -27,6 +27,8 @@ struct SdfTextClip {
 
 bool sdf_text_ready();
 void sdf_text_shutdown();
+void sdf_text_begin_frame();
+void sdf_text_flush();
 bool load_sdf_text_font(const std::string& metrics_path);
 SdfTextMetrics measure_sdf_text(const std::string& text, float pixel_size);
 bool draw_sdf_text(

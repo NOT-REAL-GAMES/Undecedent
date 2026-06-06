@@ -507,7 +507,7 @@ void draw_player_spawn_3d(
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     core_color4f(1.0F, 0.82F, 0.25F, 0.95F);
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     const float feet = spawn.position.y - config.player_eye_height;
     const float head = feet + config.player_height;
     const float x = spawn.position.x;
@@ -522,7 +522,7 @@ void draw_player_spawn_3d(
     core_vertex3f(x, spawn.position.y, z);
     core_vertex3f(x - std::sin(spawn.yaw) * 24.0F, spawn.position.y, z - std::cos(spawn.yaw) * 24.0F);
     core_end();
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -542,7 +542,7 @@ void draw_point_lights_3d(
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     core_color4f(1.0F, 0.86F, 0.35F, 0.92F);
-    glLineWidth(2.0F);
+    core_set_line_width(2.0F);
     core_begin(GL_LINES);
     for (const PointLight& light : point_lights) {
         const float x = light.position.x;
@@ -561,7 +561,7 @@ void draw_point_lights_3d(
         core_vertex3f(x + s, y - s, z);
     }
     core_end();
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
 
@@ -916,7 +916,7 @@ int draw_runtime_world(
     set_game_projection(width, height, camera, config);
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
-    glLineWidth(1.0F);
+    core_set_line_width(1.0F);
 
     const int camera_sector = sector_at_point(world, Vec3{camera.x, camera.y, camera.z});
     const bool filter_visible_sectors = filter_connected_visibility && camera_sector >= 0;

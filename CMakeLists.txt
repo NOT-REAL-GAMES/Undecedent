@@ -81,6 +81,14 @@ add_executable(UndecedentCsgTests
 
 target_include_directories(UndecedentCsgTests PRIVATE include)
 
+add_executable(UndecedentCoreDrawTests
+    tests/core_draw_tests.cpp
+    src/core_draw.cpp
+    glad/src/glad.c
+)
+
+target_include_directories(UndecedentCoreDrawTests PRIVATE include glad/include)
+
 add_executable(UndecedentEditorSliceTests
     tests/editor_slice_tests.cpp
 )
