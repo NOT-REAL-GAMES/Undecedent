@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -202,9 +203,12 @@ struct ProfilerDisplay {
     double lighting_ms = 0.0;
     double wire_overlay_ms = 0.0;
     double overlay_ms = 0.0;
+    double pace_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
     int fps = 0;
+    int effective_swap_interval = 0;
+    int fps_cap = 0;
     int total_triangles = 0;
     int visible_triangles = 0;
     int sectors = 0;
@@ -228,6 +232,7 @@ struct ProfilerAccumulator {
     double lighting_ms = 0.0;
     double wire_overlay_ms = 0.0;
     double overlay_ms = 0.0;
+    double pace_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
     double seconds = 0.0;
@@ -252,6 +257,7 @@ struct BenchmarkAccumulator {
     double lighting_ms = 0.0;
     double wire_overlay_ms = 0.0;
     double overlay_ms = 0.0;
+    double pace_ms = 0.0;
     double finish_ms = 0.0;
     double swap_ms = 0.0;
     double seconds = 0.0;
@@ -267,12 +273,30 @@ struct EffectsMenuLayout {
     float row_h = 0.0F;
 };
 
+struct PresentConfig {
+    int swap_interval = 0;
+    int effective_swap_interval = 0;
+    int fps_cap = 0;
+    bool yield_when_uncapped = false;
+};
+
 enum class RenderEffectToggle {
     None,
     Vsm,
     Csm,
     ScreenSpace,
     Fog,
+};
+
+enum class RenderMenuRow {
+    None,
+    Vsm,
+    Csm,
+    ScreenSpace,
+    Fog,
+    Present,
+    Cap,
+    Yield,
 };
 
 struct MapDialogRequests {
@@ -305,6 +329,92 @@ std::string format_fps(const double fps) {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(fps >= 1000.0 ? 0 : 1) << fps;
     return stream.str();
+}
+
+const char* swap_interval_label(const int interval) {
+    switch (interval) {
+    case -1:
+        return "ADAPT";
+    case 0:
+        return "OFF";
+    case 1:
+        return "VSYNC";
+    default:
+        return "CUSTOM";
+    }
+}
+
+std::string fps_cap_label(const int fps_cap) {
+    return fps_cap <= 0 ? std::string("UNCAP") : std::to_string(fps_cap);
+}
+
+void apply_swap_interval(SDL_Window* window, PresentConfig& config) {
+    (void)window;
+    bool applied = SDL_GL_SetSwapInterval(config.swap_interval);
+    if (!applied && config.swap_interval == -1) {
+        std::cerr << "Adaptive swap interval unsupported: " << SDL_GetError()
+                  << "; falling back to OFF.\n";
+        config.swap_interval = 0;
+        applied = SDL_GL_SetSwapInterval(config.swap_interval);
+    }
+    if (!applied) {
+        std::cerr << "SDL_GL_SetSwapInterval(" << config.swap_interval
+                  << ") failed: " << SDL_GetError() << '\n';
+    }
+
+    int effective = config.swap_interval;
+    if (!SDL_GL_GetSwapInterval(&effective)) {
+        std::cerr << "SDL_GL_GetSwapInterval failed: " << SDL_GetError() << '\n';
+    }
+    config.effective_swap_interval = effective;
+    std::cout << "Present swap interval requested " << swap_interval_label(config.swap_interval)
+              << " effective " << swap_interval_label(config.effective_swap_interval)
+              << " (" << config.effective_swap_interval << ")\n";
+}
+
+void cycle_present_mode(SDL_Window* window, PresentConfig& config) {
+    if (config.swap_interval == 0) {
+        config.swap_interval = 1;
+    } else if (config.swap_interval == 1) {
+        config.swap_interval = -1;
+    } else {
+        config.swap_interval = 0;
+    }
+    apply_swap_interval(window, config);
+}
+
+void cycle_fps_cap(PresentConfig& config) {
+    static constexpr std::array<int, 7> kFpsCaps{0, 1000, 500, 240, 144, 120, 60};
+    const auto found = std::find(kFpsCaps.begin(), kFpsCaps.end(), config.fps_cap);
+    if (found == kFpsCaps.end() || std::next(found) == kFpsCaps.end()) {
+        config.fps_cap = kFpsCaps.front();
+    } else {
+        config.fps_cap = *std::next(found);
+    }
+    std::cout << "Frame cap " << fps_cap_label(config.fps_cap) << '\n';
+}
+
+double pace_frame_before_swap(const Uint64 frame_start_ticks, const PresentConfig& config) {
+    const Uint64 pace_start_ticks = SDL_GetTicksNS();
+    if (config.fps_cap > 0) {
+        const Uint64 target_ns = static_cast<Uint64>(1'000'000'000ULL / static_cast<Uint64>(config.fps_cap));
+        const Uint64 target_ticks = frame_start_ticks + target_ns;
+        Uint64 now = SDL_GetTicksNS();
+        if (now < target_ticks) {
+            const Uint64 remaining_ns = target_ticks - now;
+            if (remaining_ns > 2'000'000ULL) {
+                SDL_Delay(static_cast<Uint32>((remaining_ns - 1'000'000ULL) / 1'000'000ULL));
+            }
+            while ((now = SDL_GetTicksNS()) < target_ticks) {
+                if (target_ticks - now > 250'000ULL) {
+                    SDL_Delay(0);
+                }
+            }
+        }
+    } else if (config.yield_when_uncapped) {
+        SDL_Delay(0);
+    }
+    return ticks_to_ms(pace_start_ticks, SDL_GetTicksNS());
 }
 
 bool point_in_screen_rect(
@@ -445,11 +555,11 @@ bool handle_script_editor_key_event(EditorWorld& editor_world, const SDL_Keyboar
 }
 
 EffectsMenuLayout effects_menu_layout(const int width, const int height) {
-    constexpr float menu_w = 230.0F;
+    constexpr float menu_w = 270.0F;
     constexpr float title_h = 30.0F;
     constexpr float row_h = 28.0F;
     constexpr float pad = 16.0F;
-    constexpr float rows = 4.0F;
+    constexpr float rows = 7.0F;
     const float menu_h = title_h + row_h * rows + 14.0F;
     return EffectsMenuLayout{
         std::max(12.0F, static_cast<float>(width) - menu_w - pad),
@@ -517,23 +627,65 @@ void toggle_render_effect(GameRenderConfig& config, const RenderEffectToggle eff
     }
 }
 
-RenderEffectToggle render_effect_from_row(const int row) {
+RenderMenuRow render_menu_row_from_index(const int row) {
     switch (row) {
     case 0:
-        return RenderEffectToggle::Vsm;
+        return RenderMenuRow::Vsm;
     case 1:
-        return RenderEffectToggle::Csm;
+        return RenderMenuRow::Csm;
     case 2:
-        return RenderEffectToggle::ScreenSpace;
+        return RenderMenuRow::ScreenSpace;
     case 3:
-        return RenderEffectToggle::Fog;
+        return RenderMenuRow::Fog;
+    case 4:
+        return RenderMenuRow::Present;
+    case 5:
+        return RenderMenuRow::Cap;
+    case 6:
+        return RenderMenuRow::Yield;
     default:
-        return RenderEffectToggle::None;
+        return RenderMenuRow::None;
+    }
+}
+
+void activate_render_menu_row(
+    GameRenderConfig& config,
+    PresentConfig& present_config,
+    SDL_Window* window,
+    const RenderMenuRow row
+) {
+    switch (row) {
+    case RenderMenuRow::Vsm:
+        toggle_render_effect(config, RenderEffectToggle::Vsm);
+        break;
+    case RenderMenuRow::Csm:
+        toggle_render_effect(config, RenderEffectToggle::Csm);
+        break;
+    case RenderMenuRow::ScreenSpace:
+        toggle_render_effect(config, RenderEffectToggle::ScreenSpace);
+        break;
+    case RenderMenuRow::Fog:
+        toggle_render_effect(config, RenderEffectToggle::Fog);
+        break;
+    case RenderMenuRow::Present:
+        cycle_present_mode(window, present_config);
+        break;
+    case RenderMenuRow::Cap:
+        cycle_fps_cap(present_config);
+        break;
+    case RenderMenuRow::Yield:
+        present_config.yield_when_uncapped = !present_config.yield_when_uncapped;
+        std::cout << "Uncapped yield " << (present_config.yield_when_uncapped ? "enabled" : "disabled") << '\n';
+        break;
+    case RenderMenuRow::None:
+        break;
     }
 }
 
 bool handle_effects_menu_click(
     GameRenderConfig& config,
+    PresentConfig& present_config,
+    SDL_Window* window,
     const int width,
     const int height,
     const float mouse_x,
@@ -548,10 +700,7 @@ bool handle_effects_menu_click(
     const float relative_y = mouse_y - layout.y - title_h;
     if (relative_y >= 0.0F) {
         const int row = static_cast<int>(relative_y / layout.row_h);
-        const RenderEffectToggle effect = render_effect_from_row(row);
-        if (effect != RenderEffectToggle::None) {
-            toggle_render_effect(config, effect);
-        }
+        activate_render_menu_row(config, present_config, window, render_menu_row_from_index(row));
     }
     return true;
 }
@@ -620,6 +769,7 @@ std::filesystem::path normalize_save_map_path(std::filesystem::path path) {
 void print_benchmark_report(
     const BenchmarkState& benchmark,
     const BenchmarkAccumulator& accumulator,
+    const PresentConfig& present_config,
     const bool editor_enabled,
     const int total_triangles,
     const int visible_triangles,
@@ -644,8 +794,12 @@ void print_benchmark_report(
         << " ssshad=" << format_ms(accumulator.screen_shadow_ms * inv_frames) << "ms"
         << " wire=" << format_ms(accumulator.wire_overlay_ms * inv_frames) << "ms"
         << " overlay=" << format_ms(accumulator.overlay_ms * inv_frames) << "ms"
+        << " pace=" << format_ms(accumulator.pace_ms * inv_frames) << "ms"
         << " finish=" << format_ms(accumulator.finish_ms * inv_frames) << "ms"
         << " swap=" << format_ms(accumulator.swap_ms * inv_frames) << "ms"
+        << " present=" << swap_interval_label(present_config.swap_interval)
+        << " swapi=" << present_config.effective_swap_interval
+        << " cap=" << fps_cap_label(present_config.fps_cap)
         << " clear=" << (benchmark.skip_clear ? "skip" : "on")
         << " swap_mode=" << (benchmark.skip_swap ? "skip" : "on")
         << " mode=" << (editor_enabled ? "editor" : "game")
@@ -1017,8 +1171,12 @@ void draw_profiler_overlay(
         "SSSHAD " + format_ms(profiler.screen_shadow_ms) + "MS",
         "WIRE " + format_ms(profiler.wire_overlay_ms) + "MS",
         "OVERLAY " + format_ms(profiler.overlay_ms) + "MS",
+        "PACE " + format_ms(profiler.pace_ms) + "MS",
         "FINISH " + format_ms(profiler.finish_ms) + "MS",
         "SWAP " + format_ms(profiler.swap_ms) + "MS",
+        "PRESENT " + std::string(swap_interval_label(profiler.effective_swap_interval)) + " CAP " +
+            fps_cap_label(profiler.fps_cap),
+        "SWAPI " + std::to_string(profiler.effective_swap_interval),
         "SHC " + std::to_string(profiler.shadow_cache_hits) + "/" + std::to_string(profiler.shadow_cache_misses),
         "SHDRAW P" + std::to_string(profiler.point_shadow_lights) +
             " F" + std::to_string(profiler.point_shadow_faces) +
@@ -1033,7 +1191,7 @@ void draw_profiler_overlay(
 
     core_begin(kCoreQuads);
     core_color4f(0.0F, 0.0F, 0.0F, 0.42F);
-    draw_screen_quad(10.0F, top_y - 6.0F, 236.0F, 12.0F + line_height * static_cast<float>(lines.size()), width, height);
+    draw_screen_quad(10.0F, top_y - 6.0F, 286.0F, 12.0F + line_height * static_cast<float>(lines.size()), width, height);
     core_end();
 
     glLineWidth(1.35F);
@@ -1045,17 +1203,21 @@ void draw_profiler_overlay(
     glDisable(GL_BLEND);
 }
 
-void draw_effects_menu(const GameRenderConfig& config, const int width, const int height) {
+void draw_effects_menu(const GameRenderConfig& config, const PresentConfig& present_config, const int width, const int height) {
     const EffectsMenuLayout layout = effects_menu_layout(width, height);
     struct Row {
         const char* label;
         bool enabled;
+        std::string value;
     };
     const Row rows[] = {
-        {"VSM", config.vsm_shadows_enabled},
-        {"CSM", config.csm_shadows_enabled},
-        {"SSS", config.screen_space_shadows_enabled},
-        {"FOG", config.fog_enabled},
+        {"VSM", config.vsm_shadows_enabled, config.vsm_shadows_enabled ? "ON" : "OFF"},
+        {"CSM", config.csm_shadows_enabled, config.csm_shadows_enabled ? "ON" : "OFF"},
+        {"SSS", config.screen_space_shadows_enabled, config.screen_space_shadows_enabled ? "ON" : "OFF"},
+        {"FOG", config.fog_enabled, config.fog_enabled ? "ON" : "OFF"},
+        {"PRESENT", present_config.effective_swap_interval != 0, swap_interval_label(present_config.swap_interval)},
+        {"CAP", present_config.fps_cap > 0, fps_cap_label(present_config.fps_cap)},
+        {"YIELD", present_config.yield_when_uncapped, present_config.yield_when_uncapped ? "ON" : "OFF"},
     };
 
     glDisable(GL_DEPTH_TEST);
@@ -1072,12 +1234,12 @@ void draw_effects_menu(const GameRenderConfig& config, const int width, const in
     core_color4f(0.90F, 0.96F, 0.76F, 0.96F);
     draw_screen_rect_outline(layout.x, layout.y, layout.w, layout.h, width, height);
     core_end();
-    draw_overlay_text("EFFECTS", layout.x + 10.0F, layout.y + 9.0F, 5.5F, width, height, 0.96F);
+    draw_overlay_text("RENDER", layout.x + 10.0F, layout.y + 9.0F, 5.5F, width, height, 0.96F);
 
     constexpr float title_h = 30.0F;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 7; ++i) {
         const float row_y = layout.y + title_h + static_cast<float>(i) * layout.row_h;
-        const float toggle_x = layout.x + layout.w - 54.0F;
+        const float toggle_x = layout.x + layout.w - 74.0F;
         const float toggle_y = row_y + 6.0F;
 
         core_begin(kCoreQuads);
@@ -1085,16 +1247,16 @@ void draw_effects_menu(const GameRenderConfig& config, const int width, const in
         draw_screen_quad(layout.x + 6.0F, row_y + 2.0F, layout.w - 12.0F, layout.row_h - 4.0F, width, height);
         if (rows[i].enabled) {
             core_color4f(0.45F, 0.70F, 0.55F, 0.70F);
-            draw_screen_quad(toggle_x, toggle_y, 40.0F, 16.0F, width, height);
+            draw_screen_quad(toggle_x, toggle_y, 60.0F, 16.0F, width, height);
         }
         core_end();
 
         core_begin(GL_LINES);
         core_color4f(0.90F, 0.96F, 0.76F, 0.95F);
-        draw_screen_rect_outline(toggle_x, toggle_y, 40.0F, 16.0F, width, height);
+        draw_screen_rect_outline(toggle_x, toggle_y, 60.0F, 16.0F, width, height);
         core_end();
         draw_overlay_text(rows[i].label, layout.x + 14.0F, row_y + 9.0F, 5.5F, width, height, 0.95F);
-        draw_overlay_text(rows[i].enabled ? "ON" : "OFF", toggle_x + 7.0F, row_y + 10.0F, 4.8F, width, height, 0.95F);
+        draw_overlay_text(rows[i].value, toggle_x + 6.0F, row_y + 10.0F, 4.8F, width, height, 0.95F);
     }
 
     glLineWidth(1.0F);
@@ -1236,7 +1398,6 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    SDL_GL_SetSwapInterval(0);
     SDL_SetEventEnabled(SDL_EVENT_MOUSE_MOTION, false);
 
     bool running = true;
@@ -1281,6 +1442,8 @@ int main() {
         kPlayerHeight,
         kPlayerRadius,
     };
+    PresentConfig present_config{};
+    apply_swap_interval(window, present_config);
     undecedent::DeferredRenderer deferred_renderer{};
     int active_material = undecedent::kDefaultMaterialId;
     set_app_mode(window, app_mode);
@@ -1311,6 +1474,7 @@ int main() {
         double lighting_ms = 0.0;
         double wire_overlay_ms = 0.0;
         double overlay_ms = 0.0;
+        double pace_ms = 0.0;
         double finish_ms = 0.0;
         double swap_ms = 0.0;
         int visible_triangle_count = 0;
@@ -1523,13 +1687,18 @@ int main() {
 
                 if (effects_menu_open && !event.key.repeat) {
                     int effect_key = -1;
-                    if (key >= SDLK_1 && key <= SDLK_4) {
+                    if (key >= SDLK_1 && key <= SDLK_7) {
                         effect_key = static_cast<int>(key - SDLK_1);
-                    } else if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_4) {
+                    } else if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_7) {
                         effect_key = static_cast<int>(scancode - SDL_SCANCODE_1);
                     }
                     if (effect_key >= 0) {
-                        toggle_render_effect(game_render_config, render_effect_from_row(effect_key));
+                        activate_render_menu_row(
+                            game_render_config,
+                            present_config,
+                            window,
+                            render_menu_row_from_index(effect_key)
+                        );
                         continue;
                     }
                 }
@@ -1603,6 +1772,7 @@ int main() {
 
                 if ((key == SDLK_F11 || event.key.scancode == SDL_SCANCODE_F11) && !event.key.repeat) {
                     toggle_exclusive_fullscreen(window, fullscreen_state);
+                    apply_swap_interval(window, present_config);
                 }
             }
 
@@ -1649,7 +1819,15 @@ int main() {
                         layout.h
                     )) {
                     if (event.button.button == SDL_BUTTON_LEFT) {
-                        handle_effects_menu_click(game_render_config, width, height, event.button.x, event.button.y);
+                        handle_effects_menu_click(
+                            game_render_config,
+                            present_config,
+                            window,
+                            width,
+                            height,
+                            event.button.x,
+                            event.button.y
+                        );
                     }
                     continue;
                 }
@@ -1661,7 +1839,15 @@ int main() {
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
                 if (effects_menu_open &&
-                    handle_effects_menu_click(game_render_config, width, height, event.button.x, event.button.y)) {
+                    handle_effects_menu_click(
+                        game_render_config,
+                        present_config,
+                        window,
+                        width,
+                        height,
+                        event.button.x,
+                        event.button.y
+                    )) {
                     continue;
                 }
                 if (handle_subdivision_controls_click(editor_world, width, height, event.button.x, event.button.y)) {
@@ -1694,7 +1880,15 @@ int main() {
                 int height = 0;
                 SDL_GetWindowSizeInPixels(window, &width, &height);
                 if (effects_menu_open &&
-                    handle_effects_menu_click(game_render_config, width, height, event.button.x, event.button.y)) {
+                    handle_effects_menu_click(
+                        game_render_config,
+                        present_config,
+                        window,
+                        width,
+                        height,
+                        event.button.x,
+                        event.button.y
+                    )) {
                     continue;
                 }
                 if (handle_subdivision_controls_click(editor_world, width, height, event.button.x, event.button.y)) {
@@ -2226,7 +2420,7 @@ int main() {
         }
         if (!benchmark.enabled && effects_menu_open) {
             core_set_identity_mvp();
-            draw_effects_menu(game_render_config, width, height);
+            draw_effects_menu(game_render_config, present_config, width, height);
         }
         if (!benchmark.enabled && editor_3d_now) {
             core_set_identity_mvp();
@@ -2254,6 +2448,8 @@ int main() {
             finish_ms = ticks_to_ms(finish_start_ticks, SDL_GetTicksNS());
         }
 
+        pace_ms = pace_frame_before_swap(frame_start_ticks, present_config);
+
         const Uint64 swap_start_ticks = SDL_GetTicksNS();
         if (!benchmark.enabled || !benchmark.skip_swap) {
             SDL_GL_SwapWindow(window);
@@ -2272,6 +2468,7 @@ int main() {
         profiler_accumulator.lighting_ms += lighting_ms;
         profiler_accumulator.wire_overlay_ms += wire_overlay_ms;
         profiler_accumulator.overlay_ms += overlay_ms;
+        profiler_accumulator.pace_ms += pace_ms;
         profiler_accumulator.finish_ms += finish_ms;
         profiler_accumulator.swap_ms += swap_ms;
         profiler_accumulator.seconds += frame_ms / 1000.0;
@@ -2289,6 +2486,7 @@ int main() {
             benchmark_accumulator.lighting_ms += lighting_ms;
             benchmark_accumulator.wire_overlay_ms += wire_overlay_ms;
             benchmark_accumulator.overlay_ms += overlay_ms;
+            benchmark_accumulator.pace_ms += pace_ms;
             benchmark_accumulator.finish_ms += finish_ms;
             benchmark_accumulator.swap_ms += swap_ms;
             benchmark_accumulator.seconds += frame_ms / 1000.0;
@@ -2297,6 +2495,7 @@ int main() {
                 print_benchmark_report(
                     benchmark,
                     benchmark_accumulator,
+                    present_config,
                     is_editor_mode(app_mode),
                     static_cast<int>(editor_world.runtime_world.triangles.size()),
                     editor_2d_now ? 0 : visible_triangle_count,
@@ -2320,9 +2519,12 @@ int main() {
             displayed_profiler.lighting_ms = profiler_accumulator.lighting_ms * inv_frames;
             displayed_profiler.wire_overlay_ms = profiler_accumulator.wire_overlay_ms * inv_frames;
             displayed_profiler.overlay_ms = profiler_accumulator.overlay_ms * inv_frames;
+            displayed_profiler.pace_ms = profiler_accumulator.pace_ms * inv_frames;
             displayed_profiler.finish_ms = profiler_accumulator.finish_ms * inv_frames;
             displayed_profiler.swap_ms = profiler_accumulator.swap_ms * inv_frames;
             displayed_profiler.fps = static_cast<int>(std::round(static_cast<double>(profiler_accumulator.frames) / profiler_accumulator.seconds));
+            displayed_profiler.effective_swap_interval = present_config.effective_swap_interval;
+            displayed_profiler.fps_cap = present_config.fps_cap;
             displayed_profiler.total_triangles = static_cast<int>(editor_world.runtime_world.triangles.size());
             displayed_profiler.visible_triangles = editor_2d_now ? 0 : visible_triangle_count;
             displayed_profiler.sectors = static_cast<int>(editor_world.runtime_world.sectors.size());
