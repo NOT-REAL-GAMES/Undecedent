@@ -33,6 +33,20 @@ PlayerPhysicsConfig player_physics_config(const GameControlConfig& config) {
     return PlayerPhysicsConfig{config.player_radius, config.player_height, config.player_eye_height};
 }
 
+void update_game_camera_mouse_look(
+    GameCamera& camera,
+    const float mouse_dx,
+    const float mouse_dy,
+    const GameControlConfig& config
+) {
+    camera.yaw -= mouse_dx * config.mouse_look_sensitivity;
+    camera.pitch = std::clamp(
+        camera.pitch - (mouse_dy * config.mouse_look_sensitivity),
+        -1.45F,
+        1.45F
+    );
+}
+
 void update_game_camera(GameCamera& camera, const float dt, const GameControlConfig& config) {
     update_game_camera_look(camera, dt, config);
     const bool* keys = SDL_GetKeyboardState(nullptr);

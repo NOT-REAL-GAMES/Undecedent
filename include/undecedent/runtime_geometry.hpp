@@ -29,6 +29,9 @@ struct RuntimeGeometry {
     std::vector<RuntimeTriangle> triangles;
     std::vector<int> material_ids;
     std::vector<RuntimeSurfaceRef> surfaces;
+    std::vector<Vec2> uv_a;
+    std::vector<Vec2> uv_b;
+    std::vector<Vec2> uv_c;
 };
 
 RuntimeGeometry build_runtime_geometry(const std::vector<SectorPlane>& sectors);

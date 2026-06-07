@@ -50,7 +50,7 @@ SaveMapResult save_error(const std::string& message) {
 }
 
 LoadMapResult load_error(const std::string& message) {
-    return LoadMapResult{false, message, {}, {}, {}, {}, {}};
+    return LoadMapResult{false, message, {}, {}, {}, {}, {}, {}};
 }
 
 std::uint32_t checksum_bytes(const std::vector<std::uint8_t>& bytes) {
@@ -407,6 +407,7 @@ LoadMapResult rebuild_loaded_sectors(
     const PlayerSpawn player_spawn,
     std::vector<PointLight> point_lights,
     const WorldLighting world_lighting = {},
+    MaterialLibrary material_library = {},
     ScriptStore scripts = {}
 ) {
     for (std::size_t i = 0; i < sectors.size(); ++i) {
@@ -431,6 +432,7 @@ LoadMapResult rebuild_loaded_sectors(
         player_spawn,
         std::move(point_lights),
         normalized_lighting(world_lighting),
+        normalized_material_library(std::move(material_library)),
         std::move(scripts)
     };
 }
@@ -849,10 +851,25 @@ std::string write_entities_payload(const PlayerSpawn& player_spawn, const std::v
     return output.str();
 }
 
-std::string write_materials_payload() {
+std::string write_materials_payload(MaterialLibrary material_library) {
+    material_library = normalized_material_library(std::move(material_library));
     std::ostringstream output;
-    output << "materials 1\n";
+    output << std::setprecision(std::numeric_limits<float>::max_digits10);
+    output << "materials 2\n";
     output << "count " << kMaterialCount << '\n';
+    for (int i = 0; i < kMaterialCount; ++i) {
+        const MaterialSlot& slot = material_library.slots[static_cast<std::size_t>(i)];
+        output << "slot "
+               << i << ' '
+               << slot.base_color.r << ' '
+               << slot.base_color.g << ' '
+               << slot.base_color.b << ' '
+               << slot.roughness << ' '
+               << slot.metallic << ' '
+               << slot.specular << ' '
+               << slot.uv_scale << ' '
+               << std::quoted(slot.albedo_texture_path) << '\n';
+    }
     return output.str();
 }
 
@@ -1051,12 +1068,12 @@ bool read_entities_payload(
     return true;
 }
 
-bool read_materials_payload(std::istream& input, std::string& message) {
+bool read_materials_payload(std::istream& input, MaterialLibrary& material_library, std::string& message) {
     if (!read_expected(input, "materials", message)) {
         return false;
     }
     int version = 0;
-    if (!(input >> version) || version != 1) {
+    if (!(input >> version) || (version != 1 && version != 2)) {
         message = "Unsupported materials chunk version.";
         return false;
     }
@@ -1071,6 +1088,49 @@ bool read_materials_payload(std::istream& input, std::string& message) {
         message = "Material palette count is unsupported.";
         return false;
     }
+    if (version == 1) {
+        material_library = default_material_library();
+        return true;
+    }
+    MaterialLibrary parsed = default_material_library();
+    std::vector<bool> seen(kMaterialCount, false);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!read_expected(input, "slot", message)) {
+            return false;
+        }
+        int index = -1;
+        MaterialSlot slot;
+        if (!(input >> index) ||
+            !read_float(input, slot.base_color.r, message) ||
+            !read_float(input, slot.base_color.g, message) ||
+            !read_float(input, slot.base_color.b, message) ||
+            !read_float(input, slot.roughness, message) ||
+            !read_float(input, slot.metallic, message) ||
+            !read_float(input, slot.specular, message) ||
+            !read_float(input, slot.uv_scale, message) ||
+            !(input >> std::quoted(slot.albedo_texture_path))) {
+            message = "Malformed material slot.";
+            return false;
+        }
+        if (index < 0 || index >= kMaterialCount || seen[static_cast<std::size_t>(index)]) {
+            message = "Material slot index is invalid or duplicated.";
+            return false;
+        }
+        seen[static_cast<std::size_t>(index)] = true;
+        parsed.slots[static_cast<std::size_t>(index)] = std::move(slot);
+    }
+    for (const bool slot_seen : seen) {
+        if (!slot_seen) {
+            message = "Material slot table is incomplete.";
+            return false;
+        }
+    }
+    material_library = normalized_material_library(std::move(parsed));
+    std::string trailing;
+    if (input >> trailing) {
+        message = "Unexpected trailing material token: " + trailing;
+        return false;
+    }
     return true;
 }
 
@@ -1079,12 +1139,13 @@ std::vector<ChunkRecord> build_chunk_records(
     PlayerSpawn player_spawn,
     std::vector<PointLight> point_lights,
     const WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
     const ScriptStore& scripts
 ) {
     const std::uint64_t next_id = assign_missing_stable_ids(sectors, player_spawn, point_lights);
     std::vector<ChunkRecord> chunks;
     chunks.push_back(ChunkRecord{kChunkMeta, 0, 0, string_payload(write_meta_payload(next_id))});
-    chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload())});
+    chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload(material_library))});
     chunks.push_back(ChunkRecord{kChunkLighting, kChunkFlagOptional, 0, string_payload(write_lighting_payload(world_lighting))});
     chunks.push_back(ChunkRecord{kChunkEntities, 0, 0, string_payload(write_entities_payload(player_spawn, point_lights))});
     if (!script_store_empty(scripts)) {
@@ -1278,6 +1339,7 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
     WorldLighting world_lighting;
+    MaterialLibrary material_library = default_material_library();
     ScriptStore scripts;
     std::vector<SectorPlane> sectors;
     std::set<std::uint64_t> sector_ids;
@@ -1294,7 +1356,7 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
         }
         if (entry.type == kChunkMaterials) {
             std::istringstream input(payload_string(payload));
-            if (!read_materials_payload(input, message)) {
+            if (!read_materials_payload(input, material_library, message)) {
                 return load_error(message);
             }
             continue;
@@ -1364,7 +1426,14 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
     }
 
     LoadMapResult result =
-        rebuild_loaded_sectors(std::move(sectors), player_spawn, std::move(point_lights), world_lighting, std::move(scripts));
+        rebuild_loaded_sectors(
+            std::move(sectors),
+            player_spawn,
+            std::move(point_lights),
+            world_lighting,
+            std::move(material_library),
+            std::move(scripts)
+        );
     if (result.ok) {
         result.message = "Loaded chunked map.";
     }
@@ -1409,11 +1478,35 @@ SaveMapResult save_map_file(
     const PlayerSpawn player_spawn,
     const std::vector<PointLight>& point_lights,
     const WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
+    const std::filesystem::path& path
+) {
+    return save_map_file(sectors, player_spawn, point_lights, world_lighting, material_library, ScriptStore{}, path);
+}
+
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const ScriptStore& scripts,
+    const std::filesystem::path& path
+) {
+    return save_map_file(sectors, player_spawn, point_lights, world_lighting, default_material_library(), scripts, path);
+}
+
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
     const ScriptStore& scripts,
     const std::filesystem::path& path
 ) {
     std::string error_message;
-    std::vector<ChunkRecord> chunks = build_chunk_records(sectors, player_spawn, point_lights, world_lighting, scripts);
+    std::vector<ChunkRecord> chunks =
+        build_chunk_records(sectors, player_spawn, point_lights, world_lighting, material_library, scripts);
     if (!write_chunk_file(path, std::move(chunks), error_message)) {
         return save_error(error_message);
     }
@@ -1449,12 +1542,46 @@ SaveMapResult save_map_file_dirty(
     const PlayerSpawn player_spawn,
     const std::vector<PointLight>& point_lights,
     const WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+) {
+    return save_map_file_dirty(sectors, player_spawn, point_lights, world_lighting, material_library, ScriptStore{}, dirty_state, path);
+}
+
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const ScriptStore& scripts,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+) {
+    return save_map_file_dirty(
+        sectors,
+        player_spawn,
+        point_lights,
+        world_lighting,
+        default_material_library(),
+        scripts,
+        dirty_state,
+        path
+    );
+}
+
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    const PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    const WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
     const ScriptStore& scripts,
     const MapDirtyState& dirty_state,
     const std::filesystem::path& path
 ) {
     if (dirty_state.topology) {
-        return save_map_file(sectors, player_spawn, point_lights, world_lighting, scripts, path);
+        return save_map_file(sectors, player_spawn, point_lights, world_lighting, material_library, scripts, path);
     }
 
     std::vector<SectorPlane> sectors_with_ids = sectors;
@@ -1471,7 +1598,7 @@ SaveMapResult save_map_file_dirty(
         parse_chunk_directory(existing_bytes, existing_directory, read_message);
 
     if (!can_reuse_existing) {
-        return save_map_file(sectors_with_ids, spawn_with_id, lights_with_ids, world_lighting, scripts, path);
+        return save_map_file(sectors_with_ids, spawn_with_id, lights_with_ids, world_lighting, material_library, scripts, path);
     }
 
     auto existing_chunk = [&existing_bytes, &existing_directory](const std::uint32_t type, const std::uint64_t id, ChunkRecord& out) {
@@ -1496,7 +1623,7 @@ SaveMapResult save_map_file_dirty(
     if (!dirty_state.materials && existing_chunk(kChunkMaterials, 0, reused)) {
         chunks.push_back(std::move(reused));
     } else {
-        chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload())});
+        chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload(material_library))});
     }
 
     if (!dirty_state.metadata && existing_chunk(kChunkLighting, 0, reused)) {

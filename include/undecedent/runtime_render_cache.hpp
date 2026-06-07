@@ -1,6 +1,7 @@
 #pragma once
 
 #include "undecedent/geometry.hpp"
+#include "undecedent/materials.hpp"
 #include "undecedent/runtime_world.hpp"
 
 #include <glad/glad.h>
@@ -23,6 +24,9 @@ struct RuntimeRenderVertex {
     float roughness = 0.72F;
     float metallic = 0.0F;
     float specular = 0.04F;
+    float u = 0.0F;
+    float v = 0.0F;
+    float material_slot = 0.0F;
 };
 
 struct RuntimeRenderRange {
@@ -39,6 +43,11 @@ struct RuntimeRenderCache {
 
 Vec3 runtime_triangle_lighting_normal(const RuntimeTriangle& triangle);
 void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const RuntimeWorld& world);
+void rebuild_runtime_render_cache(
+    RuntimeRenderCache& render_cache,
+    const RuntimeWorld& world,
+    const MaterialLibrary& material_library
+);
 void destroy_runtime_render_cache(RuntimeRenderCache& render_cache);
 
 } // namespace undecedent

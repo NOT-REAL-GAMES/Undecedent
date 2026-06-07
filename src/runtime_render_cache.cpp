@@ -88,9 +88,12 @@ Vec3 runtime_triangle_area_normal(const RuntimeTriangle& triangle) {
 void append_runtime_vertex(
     std::vector<RuntimeRenderVertex>& vertices,
     const Vec3 point,
-    const MaterialProperties material,
-    const Vec3 normal
+    const MaterialSlot material,
+    const Vec3 normal,
+    const Vec2 uv,
+    const int material_id
 ) {
+    const float uv_scale = std::max(material.uv_scale, 0.001F);
     vertices.push_back(RuntimeRenderVertex{
         point.x,
         point.y,
@@ -104,16 +107,20 @@ void append_runtime_vertex(
         material.roughness,
         material.metallic,
         material.specular,
+        uv.x / uv_scale,
+        uv.y / uv_scale,
+        static_cast<float>(clamped_material_id(material_id)),
     });
 }
 
 void append_runtime_triangle(
     std::vector<RuntimeRenderVertex>& vertices,
     const RuntimeTaggedTriangle& tagged_triangle,
-    const std::map<SmoothNormalKey, Vec3>& smooth_normals
+    const std::map<SmoothNormalKey, Vec3>& smooth_normals,
+    const MaterialLibrary& material_library
 ) {
     const RuntimeTriangle& triangle = tagged_triangle.triangle;
-    const MaterialProperties material = material_properties(tagged_triangle.material_id);
+    const MaterialSlot material = material_slot(material_library, tagged_triangle.material_id);
     const Vec3 face_normal = runtime_triangle_lighting_normal(triangle);
     const auto vertex_normal = [&](const Vec3 point) {
         if (!uses_smooth_normals(tagged_triangle)) {
@@ -122,9 +129,9 @@ void append_runtime_triangle(
         const auto found = smooth_normals.find(smooth_normal_key(tagged_triangle, point));
         return found == smooth_normals.end() ? face_normal : found->second;
     };
-    append_runtime_vertex(vertices, triangle.a, material, vertex_normal(triangle.a));
-    append_runtime_vertex(vertices, triangle.b, material, vertex_normal(triangle.b));
-    append_runtime_vertex(vertices, triangle.c, material, vertex_normal(triangle.c));
+    append_runtime_vertex(vertices, triangle.a, material, vertex_normal(triangle.a), tagged_triangle.uv_a, tagged_triangle.material_id);
+    append_runtime_vertex(vertices, triangle.b, material, vertex_normal(triangle.b), tagged_triangle.uv_b, tagged_triangle.material_id);
+    append_runtime_vertex(vertices, triangle.c, material, vertex_normal(triangle.c), tagged_triangle.uv_c, tagged_triangle.material_id);
 }
 
 std::map<SmoothNormalKey, Vec3> build_smooth_normals(const RuntimeWorld& world) {
@@ -156,6 +163,14 @@ Vec3 runtime_triangle_lighting_normal(const RuntimeTriangle& triangle) {
 }
 
 void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const RuntimeWorld& world) {
+    rebuild_runtime_render_cache(render_cache, world, default_material_library());
+}
+
+void rebuild_runtime_render_cache(
+    RuntimeRenderCache& render_cache,
+    const RuntimeWorld& world,
+    const MaterialLibrary& material_library
+) {
     if (glGenBuffers == nullptr || glBindBuffer == nullptr || glBufferData == nullptr) {
         render_cache.total_vertices = 0;
         render_cache.sector_ranges.clear();
@@ -164,6 +179,7 @@ void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const Runtim
 
     std::vector<RuntimeRenderVertex> vertices;
     const std::map<SmoothNormalKey, Vec3> smooth_normals = build_smooth_normals(world);
+    const MaterialLibrary normalized_library = normalized_material_library(material_library);
     render_cache.sector_ranges.assign(world.sectors.size(), RuntimeRenderRange{});
 
     for (std::size_t sector_index = 0; sector_index < world.sectors.size(); ++sector_index) {
@@ -173,7 +189,7 @@ void rebuild_runtime_render_cache(RuntimeRenderCache& render_cache, const Runtim
             if (tagged_triangle.sector_id != static_cast<int>(sector_index)) {
                 continue;
             }
-            append_runtime_triangle(vertices, tagged_triangle, smooth_normals);
+            append_runtime_triangle(vertices, tagged_triangle, smooth_normals, normalized_library);
         }
         range.vertex_count = static_cast<GLsizei>(vertices.size()) - range.first_vertex;
         render_cache.sector_ranges[sector_index] = range;

@@ -30,6 +30,7 @@
 #include "undecedent/game_control.hpp"
 #include "undecedent/map_io.hpp"
 #include "undecedent/math3d.hpp"
+#include "undecedent/material_texture.hpp"
 #include "undecedent/materials.hpp"
 #include "undecedent/physics.hpp"
 #include "undecedent/runtime_render_cache.hpp"
@@ -106,6 +107,7 @@ using undecedent::editor_scroll_zoom_delta;
 using undecedent::GameCamera;
 using undecedent::GameControlConfig;
 using undecedent::GameRenderConfig;
+using undecedent::MaterialTextureArray;
 using undecedent::handle_entity_dropdown_click;
 using undecedent::kCoreQuads;
 using undecedent::handle_entity_inspector_click;
@@ -137,6 +139,8 @@ using undecedent::screen_to_world_y;
 using undecedent::sector_at_point;
 using undecedent::sector_visible_in_slice;
 using undecedent::select_single_sector;
+using undecedent::clear_material_texture_path;
+using undecedent::set_material_texture_path;
 using undecedent::script_editor_apply_dirty_before_save;
 using undecedent::script_editor_apply_current;
 using undecedent::script_editor_backspace;
@@ -165,6 +169,7 @@ using undecedent::undo_editor_action;
 using undecedent::update_committed_vertex_hover;
 using undecedent::update_editor_camera;
 using undecedent::update_game_camera;
+using undecedent::update_game_camera_mouse_look;
 using undecedent::update_playtest_camera;
 using undecedent::update_snapped_mouse;
 using undecedent::update_translation_gizmo_drag;
@@ -278,6 +283,14 @@ struct EffectsMenuLayout {
     float row_h = 0.0F;
 };
 
+struct MaterialTextureControlsLayout {
+    float x = 0.0F;
+    float y = 0.0F;
+    float button_w = 86.0F;
+    float button_h = 22.0F;
+    float gap = 8.0F;
+};
+
 struct PresentConfig {
     int swap_interval = 0;
     int effective_swap_interval = 0;
@@ -308,6 +321,14 @@ struct MapDialogRequests {
     std::mutex mutex;
     std::string pending_save_path;
     std::string pending_load_path;
+    std::vector<std::string> messages;
+};
+
+struct MaterialDialogRequests {
+    std::mutex mutex;
+    std::string pending_texture_path;
+    int pending_material_id = -1;
+    int requested_material_id = -1;
     std::vector<std::string> messages;
 };
 
@@ -431,6 +452,41 @@ bool point_in_screen_rect(
     const float h
 ) {
     return px >= x && px <= x + w && py >= y && py <= y + h;
+}
+
+MaterialTextureControlsLayout material_texture_controls_layout(const int height) {
+    MaterialTextureControlsLayout layout;
+    layout.x = 276.0F;
+    layout.y = static_cast<float>(height) - 43.0F;
+    return layout;
+}
+
+enum class MaterialTextureControlAction {
+    None,
+    Assign,
+    Clear,
+};
+
+MaterialTextureControlAction material_texture_control_at(
+    const int height,
+    const float mouse_x,
+    const float mouse_y
+) {
+    const MaterialTextureControlsLayout layout = material_texture_controls_layout(height);
+    if (point_in_screen_rect(mouse_x, mouse_y, layout.x, layout.y, layout.button_w, layout.button_h)) {
+        return MaterialTextureControlAction::Assign;
+    }
+    if (point_in_screen_rect(
+            mouse_x,
+            mouse_y,
+            layout.x + layout.button_w + layout.gap,
+            layout.y,
+            layout.button_w,
+            layout.button_h
+        )) {
+        return MaterialTextureControlAction::Clear;
+    }
+    return MaterialTextureControlAction::None;
 }
 
 void sync_script_text_input(SDL_Window* window, const EditorWorld& editor_world, bool& active) {
@@ -715,6 +771,11 @@ void queue_dialog_message(MapDialogRequests& requests, std::string message) {
     requests.messages.push_back(std::move(message));
 }
 
+void queue_dialog_message(MaterialDialogRequests& requests, std::string message) {
+    std::lock_guard<std::mutex> lock(requests.mutex);
+    requests.messages.push_back(std::move(message));
+}
+
 void SDLCALL save_map_dialog_callback(void* userdata, const char* const* filelist, int) {
     auto* requests = static_cast<MapDialogRequests*>(userdata);
     if (filelist == nullptr) {
@@ -747,9 +808,33 @@ void SDLCALL load_map_dialog_callback(void* userdata, const char* const* filelis
     requests->pending_load_path = filelist[0];
 }
 
+void SDLCALL material_texture_dialog_callback(void* userdata, const char* const* filelist, int) {
+    auto* requests = static_cast<MaterialDialogRequests*>(userdata);
+    if (filelist == nullptr) {
+        queue_dialog_message(*requests, std::string("Texture dialog failed: ") + SDL_GetError());
+        return;
+    }
+
+    if (filelist[0] == nullptr) {
+        queue_dialog_message(*requests, "Texture assignment canceled.");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(requests->mutex);
+    requests->pending_texture_path = filelist[0];
+    requests->pending_material_id = requests->requested_material_id;
+}
+
 const SDL_DialogFileFilter* map_dialog_filters() {
     static const SDL_DialogFileFilter filters[] = {
         {"Undecedent Map", "udmap"},
+    };
+    return filters;
+}
+
+const SDL_DialogFileFilter* material_dialog_filters() {
+    static const SDL_DialogFileFilter filters[] = {
+        {"Image Texture", "png;jpg;jpeg;bmp"},
     };
     return filters;
 }
@@ -762,6 +847,23 @@ void show_save_map_dialog(SDL_Window* window, MapDialogRequests& requests) {
 void show_load_map_dialog(SDL_Window* window, MapDialogRequests& requests) {
     SDL_ShowOpenFileDialog(load_map_dialog_callback, &requests, window, map_dialog_filters(), 1, nullptr, false);
     std::cout << "Opening load dialog...\n";
+}
+
+void show_material_texture_dialog(SDL_Window* window, MaterialDialogRequests& requests, const int material_id) {
+    {
+        std::lock_guard<std::mutex> lock(requests.mutex);
+        requests.requested_material_id = material_id;
+    }
+    SDL_ShowOpenFileDialog(
+        material_texture_dialog_callback,
+        &requests,
+        window,
+        material_dialog_filters(),
+        1,
+        nullptr,
+        false
+    );
+    std::cout << "Opening material texture dialog for material " << (material_id + 1) << "...\n";
 }
 
 std::filesystem::path normalize_save_map_path(std::filesystem::path path) {
@@ -826,6 +928,7 @@ GameControlConfig game_control_config() {
         kPlayerTerminalFallSpeed,
         kPlayerGravityDrag,
         kPlayerGroundProbe,
+        0.0025F,
     };
 }
 
@@ -1021,6 +1124,7 @@ void dispatch_playtest_scripts(
 
 void process_pending_map_dialogs(
     EditorWorld& editor_world,
+    MaterialTextureArray& material_textures,
     GameCamera& game_camera,
     PlaytestPlayerState& playtest_state,
     undecedent::ScriptVm& script_vm,
@@ -1056,6 +1160,7 @@ void process_pending_map_dialogs(
                 undecedent::player_spawn_from_entities(editor_world.entities),
                 undecedent::point_lights_from_entities(editor_world.entities),
                 editor_world.world_lighting,
+                editor_world.material_library,
                 editor_world.scripts,
                 undecedent::editor_map_dirty_state(editor_world),
                 save_path
@@ -1083,6 +1188,8 @@ void process_pending_map_dialogs(
             result.point_lights
         );
         editor_world.world_lighting = result.world_lighting;
+        editor_world.material_library = result.material_library;
+        undecedent::mark_material_textures_dirty(material_textures);
         editor_world.scripts = result.scripts;
         editor_world.script_editor = {};
         sync_script_components(editor_world);
@@ -1102,6 +1209,39 @@ void process_pending_map_dialogs(
         }
         std::cout << result.message << " Sectors: " << editor_world.sectors.size() << '\n';
     }
+}
+
+void process_pending_material_dialogs(
+    EditorWorld& editor_world,
+    MaterialTextureArray& material_textures,
+    MaterialDialogRequests& requests
+) {
+    std::string texture_path_string;
+    int material_id = -1;
+    std::vector<std::string> messages;
+    {
+        std::lock_guard<std::mutex> lock(requests.mutex);
+        texture_path_string = std::move(requests.pending_texture_path);
+        material_id = requests.pending_material_id;
+        messages = std::move(requests.messages);
+        requests.pending_texture_path.clear();
+        requests.pending_material_id = -1;
+        requests.messages.clear();
+    }
+
+    for (const std::string& message : messages) {
+        std::cout << message << '\n';
+    }
+
+    if (texture_path_string.empty() || material_id < 0) {
+        return;
+    }
+
+    push_undo_snapshot(editor_world, "assign material texture");
+    set_material_texture_path(editor_world.material_library, material_id, texture_path_string);
+    editor_world.dirty_materials = true;
+    undecedent::mark_material_textures_dirty(material_textures);
+    std::cout << "Assigned texture to material " << (material_id + 1) << ": " << texture_path_string << '\n';
 }
 
 void draw_overlay_text(
@@ -1150,6 +1290,38 @@ void draw_fps_counter(const int fps, const int width, const int height) {
     core_set_line_width(1.5F);
     draw_overlay_text(label, x, y, size, width, height);
 
+    core_set_line_width(1.0F);
+    glDisable(GL_BLEND);
+}
+
+void draw_material_texture_controls(const EditorWorld& editor_world, const int active_material, const int width, const int height) {
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    const MaterialTextureControlsLayout layout = material_texture_controls_layout(height);
+    const auto draw_button = [&](const float x, const char* label, const bool active) {
+        core_begin(kCoreQuads);
+        core_color4f(active ? 0.18F : 0.0F, active ? 0.40F : 0.0F, active ? 0.34F : 0.0F, active ? 0.78F : 0.44F);
+        draw_screen_quad(x, layout.y, layout.button_w, layout.button_h, width, height);
+        core_end();
+        core_begin(GL_LINES);
+        core_color4f(0.90F, 0.96F, 0.76F, 0.90F);
+        draw_screen_rect_outline(x, layout.y, layout.button_w, layout.button_h, width, height);
+        core_end();
+        draw_overlay_text(label, x + 9.0F, layout.y + 6.0F, 4.6F, width, height);
+    };
+
+    const int slot_id = undecedent::clamped_material_id(active_material);
+    const bool has_texture =
+        !editor_world.material_library.slots[static_cast<std::size_t>(slot_id)].albedo_texture_path.empty();
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    core_set_line_width(1.25F);
+    draw_button(layout.x, has_texture ? "TEXTURE*" : "TEXTURE", has_texture);
+    draw_button(layout.x + layout.button_w + layout.gap, "CLEAR", false);
     core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
@@ -1354,8 +1526,16 @@ void set_app_mode(SDL_Window* window, const AppMode mode) {
         break;
     }
 
-    SDL_SetEventEnabled(SDL_EVENT_MOUSE_MOTION, mode == AppMode::Editor2D);
-    if (mode != AppMode::Editor2D) {
+    if (mode == AppMode::Playtest) {
+        SDL_SetEventEnabled(SDL_EVENT_MOUSE_MOTION, true);
+        if (!SDL_SetWindowRelativeMouseMode(window, true)) {
+            std::cout << "Cannot enable relative mouse mode: " << SDL_GetError() << '\n';
+        }
+    } else {
+        SDL_SetWindowRelativeMouseMode(window, false);
+        SDL_SetEventEnabled(SDL_EVENT_MOUSE_MOTION, mode == AppMode::Editor2D || mode == AppMode::Editor3D);
+    }
+    if (mode != AppMode::Editor2D && mode != AppMode::Editor3D && mode != AppMode::Playtest) {
         SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION);
     }
     std::cout << "Mode: " << app_mode_name(mode) << '\n';
@@ -1404,6 +1584,7 @@ int main() {
     }
 
     SDL_SetEventEnabled(SDL_EVENT_MOUSE_MOTION, false);
+    SDL_SetWindowRelativeMouseMode(window, false);
 
     bool running = true;
     AppMode app_mode = AppMode::Editor3D;
@@ -1422,6 +1603,7 @@ int main() {
     ProfilerDisplay displayed_profiler{};
     undecedent::FullscreenState fullscreen_state{};
     MapDialogRequests map_dialog_requests{};
+    MaterialDialogRequests material_dialog_requests{};
     EditorCamera editor_camera{};
     GameCamera game_camera{};
     PlaytestPlayerState playtest_state{};
@@ -1450,6 +1632,7 @@ int main() {
     PresentConfig present_config{};
     apply_swap_interval(window, present_config);
     undecedent::DeferredRenderer deferred_renderer{};
+    MaterialTextureArray material_textures{};
     int active_material = undecedent::kDefaultMaterialId;
     set_app_mode(window, app_mode);
     Uint64 previous_ticks = SDL_GetTicksNS();
@@ -1637,7 +1820,13 @@ int main() {
                     }
                 }
 
-                if (key == SDLK_ESCAPE || key == SDLK_Q) {
+                if (app_mode == AppMode::Playtest && key == SDLK_ESCAPE && !event.key.repeat) {
+                    app_mode = previous_editor_mode;
+                    set_app_mode(window, app_mode);
+                    continue;
+                }
+
+                if (key == SDLK_Q || (key == SDLK_ESCAPE && app_mode != AppMode::Playtest)) {
                     running = false;
                 }
 
@@ -1838,6 +2027,16 @@ int main() {
                 }
             }
 
+            if (app_mode == AppMode::Playtest && event.type == SDL_EVENT_MOUSE_MOTION) {
+                update_game_camera_mouse_look(
+                    game_camera,
+                    event.motion.xrel,
+                    event.motion.yrel,
+                    game_control_config()
+                );
+                continue;
+            }
+
             if (app_mode == AppMode::Editor3D && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
                 event.button.button == SDL_BUTTON_LEFT) {
                 int width = 0;
@@ -1859,6 +2058,20 @@ int main() {
                     continue;
                 }
                 if (handle_sculpt_button_click(editor_world, width, height, event.button.x, event.button.y)) {
+                    continue;
+                }
+                const MaterialTextureControlAction material_action =
+                    material_texture_control_at(height, event.button.x, event.button.y);
+                if (material_action == MaterialTextureControlAction::Assign) {
+                    show_material_texture_dialog(window, material_dialog_requests, active_material);
+                    continue;
+                }
+                if (material_action == MaterialTextureControlAction::Clear) {
+                    push_undo_snapshot(editor_world, "clear material texture");
+                    clear_material_texture_path(editor_world.material_library, active_material);
+                    editor_world.dirty_materials = true;
+                    undecedent::mark_material_textures_dirty(material_textures);
+                    std::cout << "Cleared texture for material " << (active_material + 1) << '\n';
                     continue;
                 }
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
@@ -2286,6 +2499,7 @@ int main() {
         const bool runtime_view_now = app_mode == AppMode::Editor3D || app_mode == AppMode::Playtest;
         process_pending_map_dialogs(
             editor_world,
+            material_textures,
             game_camera,
             playtest_state,
             script_vm,
@@ -2295,6 +2509,7 @@ int main() {
             is_editor_mode(app_mode),
             map_dialog_requests
         );
+        process_pending_material_dialogs(editor_world, material_textures, material_dialog_requests);
 
         const Uint64 update_start_ticks = SDL_GetTicksNS();
         if (editor_2d_now) {
@@ -2338,6 +2553,9 @@ int main() {
         if (!deferred_playtest_now && (!benchmark.enabled || !benchmark.skip_clear)) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
+        if (runtime_view_now) {
+            undecedent::ensure_material_texture_array(material_textures, editor_world.material_library);
+        }
 
         if (editor_2d_now) {
             core_set_identity_mvp();
@@ -2355,7 +2573,8 @@ int main() {
                     height,
                     game_camera,
                     runtime_wire_overlay_enabled,
-                    game_render_config
+                    game_render_config,
+                    material_textures.texture
                 );
                 gbuffer_ms = deferred_renderer.last_gbuffer_ms;
                 shadow_pack_upload_ms = deferred_renderer.last_shadow_pack_upload_ms;
@@ -2377,7 +2596,8 @@ int main() {
                     game_camera,
                     runtime_wire_overlay_enabled,
                     false,
-                    game_render_config
+                    game_render_config,
+                    material_textures.texture
                 );
             }
             if (editor_3d_now) {
@@ -2434,7 +2654,8 @@ int main() {
         if (!benchmark.enabled && editor_3d_now) {
             core_set_identity_mvp();
             core_set_identity_mvp();
-            draw_material_selector(active_material, width, height);
+            draw_material_selector(editor_world.material_library, active_material, width, height);
+            draw_material_texture_controls(editor_world, active_material, width, height);
         }
         if (!benchmark.enabled && is_editor_mode(app_mode)) {
             core_set_identity_mvp();
@@ -2553,6 +2774,7 @@ int main() {
         SDL_StopTextInput(window);
     }
     destroy_runtime_render_cache(editor_world.runtime_render_cache);
+    undecedent::destroy_material_texture_array(material_textures);
     undecedent::destroy_deferred_renderer(deferred_renderer);
     sdf_text_shutdown();
     SDL_GL_DestroyContext(gl_context);

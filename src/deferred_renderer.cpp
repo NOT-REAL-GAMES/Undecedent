@@ -73,6 +73,8 @@ GLuint create_shader_program(
         glBindAttribLocation(program, 1, "aColor");
         glBindAttribLocation(program, 2, "aNormal");
         glBindAttribLocation(program, 3, "aMaterial");
+        glBindAttribLocation(program, 4, "aTexCoord");
+        glBindAttribLocation(program, 5, "aMaterialSlot");
     }
     glLinkProgram(program);
     glDeleteShader(vertex_shader);
@@ -177,16 +179,22 @@ layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aColor;
 layout(location = 2) in vec3 aNormal;
 layout(location = 3) in vec3 aMaterial;
+layout(location = 4) in vec2 aTexCoord;
+layout(location = 5) in float aMaterialSlot;
 uniform mat4 uViewProjection;
 out vec3 vWorldPosition;
 out vec3 vNormal;
 out vec3 vAlbedo;
 out vec3 vMaterial;
+out vec2 vTexCoord;
+flat out int vMaterialSlot;
 void main() {
     vWorldPosition = aPosition;
     vNormal = normalize(aNormal);
     vAlbedo = aColor;
     vMaterial = aMaterial;
+    vTexCoord = aTexCoord;
+    vMaterialSlot = int(clamp(floor(aMaterialSlot + 0.5), 0.0, 7.0));
     gl_Position = uViewProjection * vec4(aPosition, 1.0);
 }
 )";
@@ -197,6 +205,9 @@ in vec3 vWorldPosition;
 in vec3 vNormal;
 in vec3 vAlbedo;
 in vec3 vMaterial;
+in vec2 vTexCoord;
+flat in int vMaterialSlot;
+uniform sampler2DArray uMaterialAlbedo;
 layout(location = 0) out vec4 oPosition;
 layout(location = 1) out vec4 oNormal;
 layout(location = 2) out vec4 oAlbedo;
@@ -204,7 +215,8 @@ layout(location = 3) out vec4 oMaterial;
 void main() {
     oPosition = vec4(vWorldPosition, 1.0);
     oNormal = vec4((normalize(vNormal) * 0.5) + 0.5, 1.0);
-    oAlbedo = vec4(vAlbedo, 1.0);
+    vec3 texel = texture(uMaterialAlbedo, vec3(vTexCoord, float(vMaterialSlot))).rgb;
+    oAlbedo = vec4(vAlbedo * texel, 1.0);
     oMaterial = vec4(vMaterial, 1.0);
 }
 )";
@@ -707,7 +719,9 @@ void main() {
         renderer.point_shadow_program = 0;
         renderer.shadows_disabled = true;
     }
-    renderer.geometry_view_projection = glGetUniformLocation(renderer.geometry_program, "uViewProjection");
+    renderer.geometry_uniforms.view_projection = glGetUniformLocation(renderer.geometry_program, "uViewProjection");
+    renderer.geometry_uniforms.material_albedo = glGetUniformLocation(renderer.geometry_program, "uMaterialAlbedo");
+    renderer.geometry_view_projection = renderer.geometry_uniforms.view_projection;
     cache_deferred_uniforms(renderer);
     return true;
 }

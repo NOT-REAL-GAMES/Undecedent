@@ -23,9 +23,11 @@ struct GameControlConfig {
     float terminal_fall_speed = 900.0F;
     float gravity_drag = 0.10F;
     float ground_probe = 1.0F;
+    float mouse_look_sensitivity = 0.0025F;
 };
 
 PlayerPhysicsConfig player_physics_config(const GameControlConfig& config);
+void update_game_camera_mouse_look(GameCamera& camera, float mouse_dx, float mouse_dy, const GameControlConfig& config);
 void update_game_camera(GameCamera& camera, float dt, const GameControlConfig& config);
 void update_playtest_camera(
     GameCamera& camera,

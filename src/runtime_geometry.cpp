@@ -3,6 +3,7 @@
 #include "undecedent/displacement.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 
 namespace undecedent {
@@ -51,11 +52,17 @@ void add_triangle(
     RuntimeGeometry& geometry,
     const RuntimeTriangle triangle,
     const int material_id,
-    const RuntimeSurfaceRef surface
+    const RuntimeSurfaceRef surface,
+    const Vec2 uv_a,
+    const Vec2 uv_b,
+    const Vec2 uv_c
 ) {
     geometry.triangles.push_back(triangle);
     geometry.material_ids.push_back(clamped_material_id(material_id));
     geometry.surfaces.push_back(surface);
+    geometry.uv_a.push_back(uv_a);
+    geometry.uv_b.push_back(uv_b);
+    geometry.uv_c.push_back(uv_c);
 }
 
 void add_wall_span(
@@ -67,7 +74,9 @@ void add_wall_span(
     const float top_a,
     const float top_b,
     const int material_id,
-    const RuntimeSurfaceRef surface
+    const RuntimeSurfaceRef surface,
+    const float u_a,
+    const float u_b
 ) {
     if (top_a <= bottom_a + 0.001F && top_b <= bottom_b + 0.001F) {
         return;
@@ -78,8 +87,24 @@ void add_wall_span(
     const Vec3 top_va = floor_vertex(a, top_a);
     const Vec3 top_vb = floor_vertex(b, top_b);
 
-    add_triangle(geometry, RuntimeTriangle{bottom_va, top_va, top_vb}, material_id, surface);
-    add_triangle(geometry, RuntimeTriangle{bottom_va, top_vb, bottom_vb}, material_id, surface);
+    add_triangle(
+        geometry,
+        RuntimeTriangle{bottom_va, top_va, top_vb},
+        material_id,
+        surface,
+        Vec2{u_a, bottom_a},
+        Vec2{u_a, top_a},
+        Vec2{u_b, top_b}
+    );
+    add_triangle(
+        geometry,
+        RuntimeTriangle{bottom_va, top_vb, bottom_vb},
+        material_id,
+        surface,
+        Vec2{u_a, bottom_a},
+        Vec2{u_b, top_b},
+        Vec2{u_b, bottom_b}
+    );
 }
 
 void add_wall(
@@ -88,9 +113,11 @@ void add_wall(
     const Vec2 a,
     const Vec2 b,
     const int material_id,
-    const RuntimeSurfaceRef surface
+    const RuntimeSurfaceRef surface,
+    const float edge_u_start
 ) {
     const int segments = surface_segment_count(sector);
+    const float edge_length = std::sqrt(((b.x - a.x) * (b.x - a.x)) + ((b.y - a.y) * (b.y - a.y)));
     for (int i = 0; i < segments; ++i) {
         const float t0 = static_cast<float>(i) / static_cast<float>(segments);
         const float t1 = static_cast<float>(i + 1) / static_cast<float>(segments);
@@ -105,9 +132,21 @@ void add_wall(
             sample_surface_height(sector, SectorSurfaceKind::Ceiling, p0),
             sample_surface_height(sector, SectorSurfaceKind::Ceiling, p1),
             material_id,
-            surface
+            surface,
+            edge_u_start + (edge_length * t0),
+            edge_u_start + (edge_length * t1)
         );
     }
+}
+
+float loop_u_start(const PolygonLoop& loop, const std::size_t edge_index) {
+    float u = 0.0F;
+    for (std::size_t i = 0; i < edge_index && i < loop.vertices.size(); ++i) {
+        const Vec2 a = loop.vertices[i];
+        const Vec2 b = loop.vertices[(i + 1) % loop.vertices.size()];
+        u += std::sqrt(((b.x - a.x) * (b.x - a.x)) + ((b.y - a.y) * (b.y - a.y)));
+    }
+    return u;
 }
 
 void add_loop_walls(
@@ -129,7 +168,8 @@ void add_loop_walls(
             loop.vertices[i],
             loop.vertices[(i + 1) % loop.vertices.size()],
             material_id,
-            RuntimeSurfaceRef{RuntimeSurfaceKind::HoleWall, hole_index, static_cast<int>(i)}
+            RuntimeSurfaceRef{RuntimeSurfaceKind::HoleWall, hole_index, static_cast<int>(i)},
+            loop_u_start(loop, i)
         );
     }
 }
@@ -141,9 +181,11 @@ void add_neighbor_gap_walls(
     const Vec2 a,
     const Vec2 b,
     const int material_id,
-    const RuntimeSurfaceRef surface
+    const RuntimeSurfaceRef surface,
+    const float edge_u_start
 ) {
     const int segments = std::max(surface_segment_count(sector), surface_segment_count(neighbor));
+    const float edge_length = std::sqrt(((b.x - a.x) * (b.x - a.x)) + ((b.y - a.y) * (b.y - a.y)));
     for (int i = 0; i < segments; ++i) {
         const float t0 = static_cast<float>(i) / static_cast<float>(segments);
         const float t1 = static_cast<float>(i + 1) / static_cast<float>(segments);
@@ -174,7 +216,9 @@ void add_neighbor_gap_walls(
                 sector_ceiling_0,
                 sector_ceiling_1,
                 material_id,
-                surface
+                surface,
+                edge_u_start + (edge_length * t0),
+                edge_u_start + (edge_length * t1)
             );
             continue;
         }
@@ -188,7 +232,9 @@ void add_neighbor_gap_walls(
             overlap_floor_0,
             overlap_floor_1,
             material_id,
-            surface
+            surface,
+            edge_u_start + (edge_length * t0),
+            edge_u_start + (edge_length * t1)
         );
         add_wall_span(
             geometry,
@@ -199,7 +245,9 @@ void add_neighbor_gap_walls(
             sector_ceiling_0,
             sector_ceiling_1,
             material_id,
-            surface
+            surface,
+            edge_u_start + (edge_length * t0),
+            edge_u_start + (edge_length * t1)
         );
     }
 }
@@ -224,14 +272,16 @@ RuntimeGeometry build_runtime_geometry(const std::vector<SectorPlane>& sectors) 
                 floor_vertex(triangle.a.position, triangle.a.height),
                 floor_vertex(triangle.b.position, triangle.b.height),
                 floor_vertex(triangle.c.position, triangle.c.height),
-            }, sector.floor_material, RuntimeSurfaceRef{RuntimeSurfaceKind::Floor, -1, -1});
+            }, sector.floor_material, RuntimeSurfaceRef{RuntimeSurfaceKind::Floor, -1, -1},
+            triangle.a.position, triangle.b.position, triangle.c.position);
         }
         for (const SurfaceSampleTriangle& triangle : ceiling_triangles) {
             add_triangle(geometry, RuntimeTriangle{
                 floor_vertex(triangle.c.position, triangle.c.height),
                 floor_vertex(triangle.b.position, triangle.b.height),
                 floor_vertex(triangle.a.position, triangle.a.height),
-            }, sector.ceiling_material, RuntimeSurfaceRef{RuntimeSurfaceKind::Ceiling, -1, -1});
+            }, sector.ceiling_material, RuntimeSurfaceRef{RuntimeSurfaceKind::Ceiling, -1, -1},
+            triangle.c.position, triangle.b.position, triangle.a.position);
         }
 
         for (std::size_t edge_index = 0; edge_index < sector.outer.vertices.size(); ++edge_index) {
@@ -244,9 +294,18 @@ RuntimeGeometry build_runtime_geometry(const std::vector<SectorPlane>& sectors) 
             const RuntimeSurfaceRef surface{RuntimeSurfaceKind::Wall, static_cast<int>(edge_index), -1};
 
             if (neighbor >= 0 && neighbor < static_cast<int>(sectors.size())) {
-                add_neighbor_gap_walls(geometry, sector, sectors[static_cast<std::size_t>(neighbor)], a, b, material_id, surface);
+                add_neighbor_gap_walls(
+                    geometry,
+                    sector,
+                    sectors[static_cast<std::size_t>(neighbor)],
+                    a,
+                    b,
+                    material_id,
+                    surface,
+                    loop_u_start(sector.outer, edge_index)
+                );
             } else {
-                add_wall(geometry, sector, a, b, material_id, surface);
+                add_wall(geometry, sector, a, b, material_id, surface, loop_u_start(sector.outer, edge_index));
             }
         }
 

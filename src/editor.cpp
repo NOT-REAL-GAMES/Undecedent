@@ -1011,7 +1011,11 @@ void update_snapped_mouse(
 
 void rebuild_runtime_geometry(EditorWorld& editor_world, const bool shadow_geometry_changed) {
     editor_world.runtime_world = build_runtime_world(editor_world.sectors);
-    rebuild_runtime_render_cache(editor_world.runtime_render_cache, editor_world.runtime_world);
+    rebuild_runtime_render_cache(
+        editor_world.runtime_render_cache,
+        editor_world.runtime_world,
+        editor_world.material_library
+    );
     if (shadow_geometry_changed) {
         editor_world.runtime_render_cache.shadow_revision = ++editor_world.shadow_revision_counter;
     } else {
@@ -1107,6 +1111,7 @@ EditorHistorySnapshot make_history_snapshot(const EditorWorld& editor_world) {
         editor_world.selected_sectors,
         editor_world.entities,
         editor_world.world_lighting,
+        editor_world.material_library,
         editor_world.scripts,
         editor_world.slice_z,
         editor_world.selected_sector,
@@ -1130,6 +1135,7 @@ void restore_history_snapshot(EditorWorld& editor_world, const EditorHistorySnap
     editor_world.selected_sectors = snapshot.selected_sectors;
     editor_world.entities = snapshot.entities;
     editor_world.world_lighting = snapshot.world_lighting;
+    editor_world.material_library = snapshot.material_library;
     editor_world.scripts = snapshot.scripts;
     editor_world.slice_z = snapshot.slice_z;
     editor_world.selected_sector = snapshot.selected_sector;

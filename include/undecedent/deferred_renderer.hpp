@@ -72,6 +72,11 @@ struct DeferredScreenShadowUniforms {
     GLint view_projection_matrix = -1;
 };
 
+struct DeferredGeometryUniforms {
+    GLint view_projection = -1;
+    GLint material_albedo = -1;
+};
+
 struct DeferredRenderer {
     GLuint framebuffer = 0;
     GLuint screen_shadow_framebuffer = 0;
@@ -101,6 +106,7 @@ struct DeferredRenderer {
     DeferredPointShadowUniforms point_shadow_uniforms;
     DeferredSunShadowUniforms sun_shadow_uniforms;
     DeferredScreenShadowUniforms screen_shadow_uniforms;
+    DeferredGeometryUniforms geometry_uniforms;
     GLint geometry_view_projection = -1;
     std::vector<PointLight> scratch_lights;
     std::vector<int> ranked_light_indices;

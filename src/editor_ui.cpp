@@ -201,7 +201,12 @@ void draw_property_row(
 
 } // namespace
 
-void draw_material_selector(const int active_material, const int width, const int height) {
+void draw_material_selector(
+    const MaterialLibrary& material_library,
+    const int active_material,
+    const int width,
+    const int height
+) {
     if (width <= 0 || height <= 0) {
         return;
     }
@@ -221,7 +226,7 @@ void draw_material_selector(const int active_material, const int width, const in
     core_color4f(0.0F, 0.0F, 0.0F, 0.40F);
     draw_screen_quad(10.0F, y - 8.0F, box_width, swatch + 22.0F, width, height);
     for (int i = 0; i < kMaterialCount; ++i) {
-        const MaterialColor color = material_color(i);
+        const MaterialColor color = material_color(material_library, i);
         core_color4f(color.r, color.g, color.b, 0.94F);
         draw_screen_quad(x + (static_cast<float>(i) * (swatch + gap)), y, swatch, swatch, width, height);
     }

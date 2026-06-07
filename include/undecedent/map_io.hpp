@@ -1,6 +1,7 @@
 #pragma once
 
 #include "undecedent/geometry.hpp"
+#include "undecedent/materials.hpp"
 #include "undecedent/script.hpp"
 
 #include <cstdint>
@@ -23,6 +24,7 @@ struct LoadMapResult {
     PlayerSpawn player_spawn;
     std::vector<PointLight> point_lights;
     WorldLighting world_lighting;
+    MaterialLibrary material_library;
     ScriptStore scripts;
 };
 
@@ -59,6 +61,23 @@ SaveMapResult save_map_file(
     PlayerSpawn player_spawn,
     const std::vector<PointLight>& point_lights,
     WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
+    const std::filesystem::path& path
+);
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
+    const ScriptStore& scripts,
+    const std::filesystem::path& path
+);
+SaveMapResult save_map_file(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
     const ScriptStore& scripts,
     const std::filesystem::path& path
 );
@@ -82,6 +101,25 @@ SaveMapResult save_map_file_dirty(
     PlayerSpawn player_spawn,
     const std::vector<PointLight>& point_lights,
     WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+);
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
+    const ScriptStore& scripts,
+    const MapDirtyState& dirty_state,
+    const std::filesystem::path& path
+);
+SaveMapResult save_map_file_dirty(
+    const std::vector<SectorPlane>& sectors,
+    PlayerSpawn player_spawn,
+    const std::vector<PointLight>& point_lights,
+    WorldLighting world_lighting,
+    const MaterialLibrary& material_library,
     const ScriptStore& scripts,
     const MapDirtyState& dirty_state,
     const std::filesystem::path& path

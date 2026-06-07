@@ -106,6 +106,7 @@ struct EditorHistorySnapshot {
     std::set<int> selected_sectors;
     EntityRegistry entities;
     WorldLighting world_lighting;
+    MaterialLibrary material_library;
     ScriptStore scripts;
     float slice_z = 0.0F;
     int selected_sector = -1;
@@ -143,6 +144,7 @@ struct EditorWorld {
     std::set<std::uint64_t> dirty_sector_ids;
     EntityRegistry entities;
     WorldLighting world_lighting;
+    MaterialLibrary material_library;
     ScriptStore scripts;
     ScriptEditorState script_editor;
     RuntimeWorld runtime_world;

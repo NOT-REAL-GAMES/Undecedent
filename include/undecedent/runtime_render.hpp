@@ -52,7 +52,8 @@ int draw_runtime_world(
     const GameCamera& camera,
     bool draw_wire_overlay,
     bool filter_connected_visibility,
-    const GameRenderConfig& config
+    const GameRenderConfig& config,
+    GLuint material_texture_array = 0
 );
 
 int draw_deferred_runtime_world(
@@ -65,7 +66,8 @@ int draw_deferred_runtime_world(
     int height,
     const GameCamera& camera,
     bool draw_wire_overlay,
-    const GameRenderConfig& config
+    const GameRenderConfig& config,
+    GLuint material_texture_array = 0
 );
 
 } // namespace undecedent

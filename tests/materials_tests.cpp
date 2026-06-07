@@ -44,10 +44,44 @@ void test_invalid_material_ids_clamp_to_default() {
     assert(high_material.specular == default_material.specular);
 }
 
+void test_material_library_defaults_and_texture_paths() {
+    MaterialLibrary library = default_material_library();
+    for (int material_id = 0; material_id < kMaterialCount; ++material_id) {
+        const MaterialSlot slot = material_slot(library, material_id);
+        assert(slot.uv_scale == 64.0F);
+        assert(slot.albedo_texture_path.empty());
+        assert(finite_unit(slot.base_color.r));
+        assert(finite_unit(slot.base_color.g));
+        assert(finite_unit(slot.base_color.b));
+    }
+
+    set_material_texture_path(library, 3, "textures/brick.png");
+    assert(material_slot(library, 3).albedo_texture_path == "textures/brick.png");
+    clear_material_texture_path(library, 3);
+    assert(material_slot(library, 3).albedo_texture_path.empty());
+}
+
+void test_material_library_normalization() {
+    MaterialLibrary library = default_material_library();
+    library.slots[1].roughness = -2.0F;
+    library.slots[1].metallic = 9.0F;
+    library.slots[1].specular = -1.0F;
+    library.slots[1].uv_scale = 0.0F;
+    const MaterialLibrary normalized = normalized_material_library(std::move(library));
+    const MaterialSlot fallback = material_slot(default_material_library(), 1);
+    const MaterialSlot slot = material_slot(normalized, 1);
+    assert(slot.roughness == fallback.roughness);
+    assert(slot.metallic == fallback.metallic);
+    assert(slot.specular == fallback.specular);
+    assert(slot.uv_scale == fallback.uv_scale);
+}
+
 } // namespace
 
 int main() {
     test_material_properties_are_valid();
     test_invalid_material_ids_clamp_to_default();
+    test_material_library_defaults_and_texture_paths();
+    test_material_library_normalization();
     return 0;
 }

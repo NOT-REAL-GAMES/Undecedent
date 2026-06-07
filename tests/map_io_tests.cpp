@@ -714,6 +714,32 @@ int main() {
     }
 
     {
+        const std::filesystem::path path = test_path("undecedent_map_io_materials_v2.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        materials.slots[2].base_color = undecedent::MaterialColor{0.2F, 0.3F, 0.4F};
+        materials.slots[2].roughness = 0.55F;
+        materials.slots[2].metallic = 0.25F;
+        materials.slots[2].specular = 0.15F;
+        materials.slots[2].uv_scale = 128.0F;
+        materials.slots[2].albedo_texture_path = "textures/test_albedo.png";
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "materials v2 map should save");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "materials v2 map should load");
+        const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 2);
+        expect(std::abs(slot.base_color.r - 0.2F) <= 0.001F, "material color should round-trip");
+        expect(std::abs(slot.roughness - 0.55F) <= 0.001F, "material roughness should round-trip");
+        expect(std::abs(slot.metallic - 0.25F) <= 0.001F, "material metallic should round-trip");
+        expect(std::abs(slot.specular - 0.15F) <= 0.001F, "material specular should round-trip");
+        expect(std::abs(slot.uv_scale - 128.0F) <= 0.001F, "material UV scale should round-trip");
+        expect(slot.albedo_texture_path == "textures/test_albedo.png", "texture path should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
         const std::filesystem::path path = test_path("undecedent_map_io_invalid_loop.udmap");
         write_text(path,
             "UNDECEDENT_MAP 1\n"

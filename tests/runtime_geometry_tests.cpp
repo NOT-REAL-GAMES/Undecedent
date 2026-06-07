@@ -50,7 +50,13 @@ int main() {
         expect(geometry.triangles.size() == 12, "single rectangle should create 2 floor, 2 ceiling, and 8 wall triangles");
         expect(geometry.material_ids.size() == geometry.triangles.size(), "runtime geometry should tag every triangle with a material");
         expect(geometry.surfaces.size() == geometry.triangles.size(), "runtime geometry should tag every triangle with a surface");
+        expect(geometry.uv_a.size() == geometry.triangles.size(), "runtime geometry should emit first UV per triangle");
+        expect(geometry.uv_b.size() == geometry.triangles.size(), "runtime geometry should emit second UV per triangle");
+        expect(geometry.uv_c.size() == geometry.triangles.size(), "runtime geometry should emit third UV per triangle");
         expect(geometry.triangles.front().a.y == 32.0F, "floor offset should move floor triangles");
+        expect(geometry.uv_a.front().x == geometry.triangles.front().a.x &&
+            geometry.uv_a.front().y == geometry.triangles.front().a.z,
+            "floor UVs should match their vertex world X/Z coordinates");
     }
 
     {
@@ -150,6 +156,14 @@ int main() {
 
         const undecedent::RuntimeGeometry geometry = undecedent::build_runtime_geometry(subtracted.sectors);
         expect(geometry.triangles.size() == 32, "rectangle with one rectangular hole should create inner and outer walls");
+        bool found_hole_wall_uv = false;
+        for (std::size_t i = 0; i < geometry.surfaces.size(); ++i) {
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::HoleWall &&
+                geometry.uv_b[i].y > geometry.uv_a[i].y) {
+                found_hole_wall_uv = true;
+            }
+        }
+        expect(found_hole_wall_uv, "hole-wall UVs should use vertical height");
     }
 
     return EXIT_SUCCESS;

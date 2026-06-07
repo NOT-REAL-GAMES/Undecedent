@@ -33,6 +33,7 @@ add_executable(Undecedent
     src/entity.cpp
     src/game_control.cpp
     src/map_io.cpp
+    src/material_texture.cpp
     src/materials.cpp
     src/math3d.cpp
     src/physics.cpp
@@ -132,6 +133,7 @@ add_executable(UndecedentMapIoTests
     src/displacement.cpp
     src/entity.cpp
     src/map_io.cpp
+    src/materials.cpp
     src/script.cpp
     src/triangulator.cpp
 )
