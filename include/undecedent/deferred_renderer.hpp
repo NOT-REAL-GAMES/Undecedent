@@ -75,6 +75,10 @@ struct DeferredScreenShadowUniforms {
 struct DeferredGeometryUniforms {
     GLint view_projection = -1;
     GLint material_albedo = -1;
+    GLint material_normal = -1;
+    GLint material_smoothness = -1;
+    GLint material_ao = -1;
+    GLint material_metallic = -1;
 };
 
 struct DeferredRenderer {

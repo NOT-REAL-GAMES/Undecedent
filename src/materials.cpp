@@ -108,17 +108,19 @@ MaterialLibrary normalized_material_library(MaterialLibrary library) {
         if (slot.uv_scale <= 0.0F) {
             slot.uv_scale = fallback.uv_scale;
         }
-        if (slot.albedo_texture_codec != MaterialTextureImageCodec::SdlSurfaceImage &&
-            slot.albedo_texture_codec != MaterialTextureImageCodec::JpegXl) {
-            slot.albedo_texture_codec = MaterialTextureImageCodec::SdlSurfaceImage;
-        }
-        if (slot.texture_storage_mode != MaterialTextureStorageMode::SourceBytes &&
-            slot.texture_storage_mode != MaterialTextureStorageMode::JpegXlLossless &&
-            slot.texture_storage_mode != MaterialTextureStorageMode::JpegXlLossy) {
-            slot.texture_storage_mode = MaterialTextureStorageMode::SourceBytes;
-        }
-        if (slot.jxl_quality < 1 || slot.jxl_quality > 100) {
-            slot.jxl_quality = 80;
+        for (MaterialTextureSource& source : slot.textures) {
+            if (source.codec != MaterialTextureImageCodec::SdlSurfaceImage &&
+                source.codec != MaterialTextureImageCodec::JpegXl) {
+                source.codec = MaterialTextureImageCodec::SdlSurfaceImage;
+            }
+            if (source.storage_mode != MaterialTextureStorageMode::SourceBytes &&
+                source.storage_mode != MaterialTextureStorageMode::JpegXlLossless &&
+                source.storage_mode != MaterialTextureStorageMode::JpegXlLossy) {
+                source.storage_mode = MaterialTextureStorageMode::SourceBytes;
+            }
+            if (source.jxl_quality < 1 || source.jxl_quality > 100) {
+                source.jxl_quality = 80;
+            }
         }
     }
     return library;
@@ -134,14 +136,84 @@ MaterialTextureImageCodec material_texture_codec_for_path(const std::filesystem:
         : MaterialTextureImageCodec::SdlSurfaceImage;
 }
 
-void set_material_texture_path(MaterialLibrary& library, const int material_id, std::filesystem::path path) {
+int material_texture_channel_index(const MaterialTextureChannel channel) {
+    const int index = static_cast<int>(channel);
+    if (index < 0 || index >= kMaterialTextureChannelCount) {
+        return 0;
+    }
+    return index;
+}
+
+const char* material_texture_channel_label(const MaterialTextureChannel channel) {
+    switch (channel) {
+    case MaterialTextureChannel::Normal: return "Normal";
+    case MaterialTextureChannel::Smoothness: return "Smoothness";
+    case MaterialTextureChannel::AmbientOcclusion: return "Ambient Occlusion";
+    case MaterialTextureChannel::Metallic: return "Metallic";
+    case MaterialTextureChannel::Albedo:
+    default:
+        return "Albedo";
+    }
+}
+
+const char* material_texture_channel_short_label(const MaterialTextureChannel channel) {
+    switch (channel) {
+    case MaterialTextureChannel::Normal: return "NRM";
+    case MaterialTextureChannel::Smoothness: return "SMO";
+    case MaterialTextureChannel::AmbientOcclusion: return "AO";
+    case MaterialTextureChannel::Metallic: return "MET";
+    case MaterialTextureChannel::Albedo:
+    default:
+        return "ALB";
+    }
+}
+
+MaterialTextureSource& material_texture_source(MaterialSlot& slot, const MaterialTextureChannel channel) {
+    return slot.textures[static_cast<std::size_t>(material_texture_channel_index(channel))];
+}
+
+const MaterialTextureSource& material_texture_source(const MaterialSlot& slot, const MaterialTextureChannel channel) {
+    return slot.textures[static_cast<std::size_t>(material_texture_channel_index(channel))];
+}
+
+bool material_texture_source_has_texture(const MaterialTextureSource& source) {
+    return !source.path.empty() || !source.bytes.empty();
+}
+
+void set_material_texture_path(
+    MaterialLibrary& library,
+    const int material_id,
+    const MaterialTextureChannel channel,
+    std::filesystem::path path
+) {
     MaterialSlot& slot = library.slots[static_cast<std::size_t>(clamped_material_id(material_id))];
-    slot.albedo_texture_path = path.lexically_normal().generic_string();
-    slot.albedo_texture_name.clear();
-    slot.albedo_texture_bytes.clear();
-    slot.albedo_texture_codec = material_texture_codec_for_path(path);
-    slot.texture_storage_mode = MaterialTextureStorageMode::SourceBytes;
-    slot.jxl_quality = 80;
+    MaterialTextureSource& source = material_texture_source(slot, channel);
+    source.path = path.lexically_normal().generic_string();
+    source.name.clear();
+    source.bytes.clear();
+    source.codec = material_texture_codec_for_path(path);
+    source.storage_mode = MaterialTextureStorageMode::SourceBytes;
+    source.jxl_quality = 80;
+}
+
+void set_material_texture_path(MaterialLibrary& library, const int material_id, std::filesystem::path path) {
+    set_material_texture_path(library, material_id, MaterialTextureChannel::Albedo, std::move(path));
+}
+
+void set_material_texture(
+    MaterialLibrary& library,
+    const int material_id,
+    const MaterialTextureChannel channel,
+    std::filesystem::path path,
+    std::string name,
+    std::vector<std::uint8_t> bytes
+) {
+    MaterialSlot& slot = library.slots[static_cast<std::size_t>(clamped_material_id(material_id))];
+    MaterialTextureSource& source = material_texture_source(slot, channel);
+    source.path = path.lexically_normal().generic_string();
+    source.name = std::move(name);
+    source.bytes = std::move(bytes);
+    source.codec = material_texture_codec_for_path(path);
 }
 
 void set_material_texture(
@@ -151,21 +223,33 @@ void set_material_texture(
     std::string name,
     std::vector<std::uint8_t> bytes
 ) {
+    set_material_texture(
+        library,
+        material_id,
+        MaterialTextureChannel::Albedo,
+        std::move(path),
+        std::move(name),
+        std::move(bytes)
+    );
+}
+
+void clear_material_texture_path(
+    MaterialLibrary& library,
+    const int material_id,
+    const MaterialTextureChannel channel
+) {
     MaterialSlot& slot = library.slots[static_cast<std::size_t>(clamped_material_id(material_id))];
-    slot.albedo_texture_path = path.lexically_normal().generic_string();
-    slot.albedo_texture_name = std::move(name);
-    slot.albedo_texture_bytes = std::move(bytes);
-    slot.albedo_texture_codec = material_texture_codec_for_path(path);
+    MaterialTextureSource& source = material_texture_source(slot, channel);
+    source.path.clear();
+    source.name.clear();
+    source.bytes.clear();
+    source.codec = MaterialTextureImageCodec::SdlSurfaceImage;
+    source.storage_mode = MaterialTextureStorageMode::SourceBytes;
+    source.jxl_quality = 80;
 }
 
 void clear_material_texture_path(MaterialLibrary& library, const int material_id) {
-    MaterialSlot& slot = library.slots[static_cast<std::size_t>(clamped_material_id(material_id))];
-    slot.albedo_texture_path.clear();
-    slot.albedo_texture_name.clear();
-    slot.albedo_texture_bytes.clear();
-    slot.albedo_texture_codec = MaterialTextureImageCodec::SdlSurfaceImage;
-    slot.texture_storage_mode = MaterialTextureStorageMode::SourceBytes;
-    slot.jxl_quality = 80;
+    clear_material_texture_path(library, material_id, MaterialTextureChannel::Albedo);
 }
 
 } // namespace undecedent

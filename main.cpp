@@ -109,6 +109,7 @@ using undecedent::GameCamera;
 using undecedent::GameControlConfig;
 using undecedent::GameRenderConfig;
 using undecedent::MaterialTextureArray;
+using undecedent::MaterialTextureChannel;
 using undecedent::handle_entity_dropdown_click;
 using undecedent::kCoreQuads;
 using undecedent::handle_entity_inspector_click;
@@ -287,6 +288,8 @@ struct EffectsMenuLayout {
 struct MaterialTextureControlsLayout {
     float x = 0.0F;
     float y = 0.0F;
+    float channel_y = 0.0F;
+    float channel_w = 42.0F;
     float button_w = 86.0F;
     float button_h = 22.0F;
     float gap = 8.0F;
@@ -329,7 +332,9 @@ struct MaterialDialogRequests {
     std::mutex mutex;
     std::string pending_texture_path;
     int pending_material_id = -1;
+    MaterialTextureChannel pending_channel = MaterialTextureChannel::Albedo;
     int requested_material_id = -1;
+    MaterialTextureChannel requested_channel = MaterialTextureChannel::Albedo;
     std::vector<std::string> messages;
 };
 
@@ -458,12 +463,18 @@ bool point_in_screen_rect(
 MaterialTextureControlsLayout material_texture_controls_layout(const int height) {
     MaterialTextureControlsLayout layout;
     layout.x = 276.0F;
+    layout.channel_y = static_cast<float>(height) - 70.0F;
     layout.y = static_cast<float>(height) - 43.0F;
     return layout;
 }
 
 enum class MaterialTextureControlAction {
     None,
+    SelectAlbedo,
+    SelectNormal,
+    SelectSmoothness,
+    SelectAo,
+    SelectMetallic,
     Assign,
     Clear,
     CycleStorage,
@@ -481,19 +492,19 @@ const char* material_texture_storage_mode_label(const undecedent::MaterialTextur
     }
 }
 
-void cycle_material_texture_storage_mode(undecedent::MaterialSlot& slot) {
-    switch (slot.texture_storage_mode) {
+void cycle_material_texture_storage_mode(undecedent::MaterialTextureSource& source) {
+    switch (source.storage_mode) {
     case undecedent::MaterialTextureStorageMode::SourceBytes:
-        slot.texture_storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossless;
+        source.storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossless;
         break;
     case undecedent::MaterialTextureStorageMode::JpegXlLossless:
-        slot.texture_storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossy;
-        slot.jxl_quality = 80;
+        source.storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossy;
+        source.jxl_quality = 80;
         break;
     case undecedent::MaterialTextureStorageMode::JpegXlLossy:
     default:
-        slot.texture_storage_mode = undecedent::MaterialTextureStorageMode::SourceBytes;
-        slot.jxl_quality = 80;
+        source.storage_mode = undecedent::MaterialTextureStorageMode::SourceBytes;
+        source.jxl_quality = 80;
         break;
     }
 }
@@ -504,6 +515,20 @@ MaterialTextureControlAction material_texture_control_at(
     const float mouse_y
 ) {
     const MaterialTextureControlsLayout layout = material_texture_controls_layout(height);
+    for (int channel_index = 0; channel_index < undecedent::kMaterialTextureChannelCount; ++channel_index) {
+        const float x = layout.x + (static_cast<float>(channel_index) * (layout.channel_w + layout.gap));
+        if (point_in_screen_rect(mouse_x, mouse_y, x, layout.channel_y, layout.channel_w, layout.button_h)) {
+            switch (static_cast<undecedent::MaterialTextureChannel>(channel_index)) {
+            case undecedent::MaterialTextureChannel::Normal: return MaterialTextureControlAction::SelectNormal;
+            case undecedent::MaterialTextureChannel::Smoothness: return MaterialTextureControlAction::SelectSmoothness;
+            case undecedent::MaterialTextureChannel::AmbientOcclusion: return MaterialTextureControlAction::SelectAo;
+            case undecedent::MaterialTextureChannel::Metallic: return MaterialTextureControlAction::SelectMetallic;
+            case undecedent::MaterialTextureChannel::Albedo:
+            default:
+                return MaterialTextureControlAction::SelectAlbedo;
+            }
+        }
+    }
     if (point_in_screen_rect(mouse_x, mouse_y, layout.x, layout.y, layout.button_w, layout.button_h)) {
         return MaterialTextureControlAction::Assign;
     }
@@ -864,6 +889,7 @@ void SDLCALL material_texture_dialog_callback(void* userdata, const char* const*
     std::lock_guard<std::mutex> lock(requests->mutex);
     requests->pending_texture_path = filelist[0];
     requests->pending_material_id = requests->requested_material_id;
+    requests->pending_channel = requests->requested_channel;
 }
 
 const SDL_DialogFileFilter* map_dialog_filters() {
@@ -904,10 +930,16 @@ void show_load_map_dialog(SDL_Window* window, MapDialogRequests& requests) {
     std::cout << "Opening load dialog...\n";
 }
 
-void show_material_texture_dialog(SDL_Window* window, MaterialDialogRequests& requests, const int material_id) {
+void show_material_texture_dialog(
+    SDL_Window* window,
+    MaterialDialogRequests& requests,
+    const int material_id,
+    const MaterialTextureChannel channel
+) {
     {
         std::lock_guard<std::mutex> lock(requests.mutex);
         requests.requested_material_id = material_id;
+        requests.requested_channel = channel;
     }
     SDL_ShowOpenFileDialog(
         material_texture_dialog_callback,
@@ -918,7 +950,8 @@ void show_material_texture_dialog(SDL_Window* window, MaterialDialogRequests& re
         nullptr,
         false
     );
-    std::cout << "Opening material texture dialog for material " << (material_id + 1) << "...\n";
+    std::cout << "Opening " << undecedent::material_texture_channel_label(channel)
+              << " texture dialog for material " << (material_id + 1) << "...\n";
 }
 
 std::filesystem::path normalize_save_map_path(std::filesystem::path path) {
@@ -1273,14 +1306,17 @@ void process_pending_material_dialogs(
 ) {
     std::string texture_path_string;
     int material_id = -1;
+    MaterialTextureChannel channel = MaterialTextureChannel::Albedo;
     std::vector<std::string> messages;
     {
         std::lock_guard<std::mutex> lock(requests.mutex);
         texture_path_string = std::move(requests.pending_texture_path);
         material_id = requests.pending_material_id;
+        channel = requests.pending_channel;
         messages = std::move(requests.messages);
         requests.pending_texture_path.clear();
         requests.pending_material_id = -1;
+        requests.pending_channel = MaterialTextureChannel::Albedo;
         requests.messages.clear();
     }
 
@@ -1304,13 +1340,15 @@ void process_pending_material_dialogs(
     set_material_texture(
         editor_world.material_library,
         material_id,
+        channel,
         texture_path,
         texture_path.filename().generic_string(),
         std::move(texture_bytes)
     );
     editor_world.dirty_materials = true;
     undecedent::mark_material_textures_dirty(material_textures);
-    std::cout << "Assigned texture to material " << (material_id + 1) << ": " << texture_path_string << '\n';
+    std::cout << "Assigned " << undecedent::material_texture_channel_label(channel)
+              << " texture to material " << (material_id + 1) << ": " << texture_path_string << '\n';
 }
 
 void draw_overlay_text(
@@ -1363,41 +1401,63 @@ void draw_fps_counter(const int fps, const int width, const int height) {
     glDisable(GL_BLEND);
 }
 
-void draw_material_texture_controls(const EditorWorld& editor_world, const int active_material, const int width, const int height) {
+void draw_material_texture_controls(
+    const EditorWorld& editor_world,
+    const int active_material,
+    const MaterialTextureChannel active_channel,
+    const int width,
+    const int height
+) {
     if (width <= 0 || height <= 0) {
         return;
     }
 
     const MaterialTextureControlsLayout layout = material_texture_controls_layout(height);
-    const auto draw_button = [&](const float x, const char* label, const bool active) {
+    const auto draw_button = [&](const float x, const float y, const float w, const std::string& label, const bool active) {
         core_begin(kCoreQuads);
         core_color4f(active ? 0.18F : 0.0F, active ? 0.40F : 0.0F, active ? 0.34F : 0.0F, active ? 0.78F : 0.44F);
-        draw_screen_quad(x, layout.y, layout.button_w, layout.button_h, width, height);
+        draw_screen_quad(x, y, w, layout.button_h, width, height);
         core_end();
         core_begin(GL_LINES);
         core_color4f(0.90F, 0.96F, 0.76F, 0.90F);
-        draw_screen_rect_outline(x, layout.y, layout.button_w, layout.button_h, width, height);
+        draw_screen_rect_outline(x, y, w, layout.button_h, width, height);
         core_end();
-        draw_overlay_text(label, x + 9.0F, layout.y + 6.0F, 4.6F, width, height);
+        draw_overlay_text(label, x + 9.0F, y + 6.0F, 4.6F, width, height);
     };
 
     const int slot_id = undecedent::clamped_material_id(active_material);
     const undecedent::MaterialSlot& slot =
         editor_world.material_library.slots[static_cast<std::size_t>(slot_id)];
+    const undecedent::MaterialTextureSource& source =
+        undecedent::material_texture_source(slot, active_channel);
     const bool has_texture =
-        !slot.albedo_texture_path.empty() || !slot.albedo_texture_bytes.empty();
+        undecedent::material_texture_source_has_texture(source);
     const bool compressed_mode =
-        slot.texture_storage_mode != undecedent::MaterialTextureStorageMode::SourceBytes;
+        source.storage_mode != undecedent::MaterialTextureStorageMode::SourceBytes;
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     core_set_line_width(1.25F);
-    draw_button(layout.x, has_texture ? "TEXTURE*" : "TEXTURE", has_texture);
-    draw_button(layout.x + layout.button_w + layout.gap, "CLEAR", false);
+    for (int channel_index = 0; channel_index < undecedent::kMaterialTextureChannelCount; ++channel_index) {
+        const auto channel = static_cast<undecedent::MaterialTextureChannel>(channel_index);
+        const bool channel_active = channel == active_channel;
+        const bool channel_has_texture =
+            undecedent::material_texture_source_has_texture(undecedent::material_texture_source(slot, channel));
+        const float x = layout.x + (static_cast<float>(channel_index) * (layout.channel_w + layout.gap));
+        std::string label = undecedent::material_texture_channel_short_label(channel);
+        if (channel_has_texture) {
+            label += "*";
+        }
+        draw_button(x, layout.channel_y, layout.channel_w, label, channel_active);
+    }
+    draw_button(layout.x, layout.y, layout.button_w, has_texture ? "TEXTURE*" : "TEXTURE", has_texture);
+    draw_button(layout.x + layout.button_w + layout.gap, layout.y, layout.button_w, "CLEAR", false);
     draw_button(
         layout.x + ((layout.button_w + layout.gap) * 2.0F),
-        material_texture_storage_mode_label(slot.texture_storage_mode),
+        layout.y,
+        layout.button_w,
+        material_texture_storage_mode_label(source.storage_mode),
         compressed_mode
     );
     core_set_line_width(1.0F);
@@ -1712,6 +1772,7 @@ int main() {
     undecedent::DeferredRenderer deferred_renderer{};
     MaterialTextureArray material_textures{};
     int active_material = undecedent::kDefaultMaterialId;
+    MaterialTextureChannel active_material_channel = MaterialTextureChannel::Albedo;
     set_app_mode(window, app_mode);
     Uint64 previous_ticks = SDL_GetTicksNS();
     while (running) {
@@ -2144,16 +2205,44 @@ int main() {
                 }
                 const MaterialTextureControlAction material_action =
                     material_texture_control_at(height, event.button.x, event.button.y);
+                if (material_action == MaterialTextureControlAction::SelectAlbedo ||
+                    material_action == MaterialTextureControlAction::SelectNormal ||
+                    material_action == MaterialTextureControlAction::SelectSmoothness ||
+                    material_action == MaterialTextureControlAction::SelectAo ||
+                    material_action == MaterialTextureControlAction::SelectMetallic) {
+                    switch (material_action) {
+                    case MaterialTextureControlAction::SelectNormal:
+                        active_material_channel = MaterialTextureChannel::Normal;
+                        break;
+                    case MaterialTextureControlAction::SelectSmoothness:
+                        active_material_channel = MaterialTextureChannel::Smoothness;
+                        break;
+                    case MaterialTextureControlAction::SelectAo:
+                        active_material_channel = MaterialTextureChannel::AmbientOcclusion;
+                        break;
+                    case MaterialTextureControlAction::SelectMetallic:
+                        active_material_channel = MaterialTextureChannel::Metallic;
+                        break;
+                    case MaterialTextureControlAction::SelectAlbedo:
+                    default:
+                        active_material_channel = MaterialTextureChannel::Albedo;
+                        break;
+                    }
+                    std::cout << "Selected " << undecedent::material_texture_channel_label(active_material_channel)
+                              << " texture channel\n";
+                    continue;
+                }
                 if (material_action == MaterialTextureControlAction::Assign) {
-                    show_material_texture_dialog(window, material_dialog_requests, active_material);
+                    show_material_texture_dialog(window, material_dialog_requests, active_material, active_material_channel);
                     continue;
                 }
                 if (material_action == MaterialTextureControlAction::Clear) {
                     push_undo_snapshot(editor_world, "clear material texture");
-                    clear_material_texture_path(editor_world.material_library, active_material);
+                    clear_material_texture_path(editor_world.material_library, active_material, active_material_channel);
                     editor_world.dirty_materials = true;
                     undecedent::mark_material_textures_dirty(material_textures);
-                    std::cout << "Cleared texture for material " << (active_material + 1) << '\n';
+                    std::cout << "Cleared " << undecedent::material_texture_channel_label(active_material_channel)
+                              << " texture for material " << (active_material + 1) << '\n';
                     continue;
                 }
                 if (material_action == MaterialTextureControlAction::CycleStorage) {
@@ -2161,11 +2250,15 @@ int main() {
                     undecedent::MaterialSlot& slot = editor_world.material_library.slots[
                         static_cast<std::size_t>(undecedent::clamped_material_id(active_material))
                     ];
-                    cycle_material_texture_storage_mode(slot);
+                    undecedent::MaterialTextureSource& source =
+                        undecedent::material_texture_source(slot, active_material_channel);
+                    cycle_material_texture_storage_mode(source);
                     editor_world.dirty_materials = true;
                     undecedent::mark_material_textures_dirty(material_textures);
-                    std::cout << "Material " << (active_material + 1) << " texture storage "
-                              << material_texture_storage_mode_label(slot.texture_storage_mode) << '\n';
+                    std::cout << "Material " << (active_material + 1) << ' '
+                              << undecedent::material_texture_channel_label(active_material_channel)
+                              << " texture storage "
+                              << material_texture_storage_mode_label(source.storage_mode) << '\n';
                     continue;
                 }
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {
@@ -2668,7 +2761,7 @@ int main() {
                     game_camera,
                     runtime_wire_overlay_enabled,
                     game_render_config,
-                    material_textures.texture
+                    &material_textures
                 );
                 gbuffer_ms = deferred_renderer.last_gbuffer_ms;
                 shadow_pack_upload_ms = deferred_renderer.last_shadow_pack_upload_ms;
@@ -2691,7 +2784,7 @@ int main() {
                     runtime_wire_overlay_enabled,
                     false,
                     game_render_config,
-                    material_textures.texture
+                    &material_textures
                 );
             }
             if (editor_3d_now) {
@@ -2749,7 +2842,7 @@ int main() {
             core_set_identity_mvp();
             core_set_identity_mvp();
             draw_material_selector(editor_world.material_library, active_material, width, height);
-            draw_material_texture_controls(editor_world, active_material, width, height);
+            draw_material_texture_controls(editor_world, active_material, active_material_channel, width, height);
         }
         if (!benchmark.enabled && is_editor_mode(app_mode)) {
             core_set_identity_mvp();

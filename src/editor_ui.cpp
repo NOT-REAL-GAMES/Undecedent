@@ -253,6 +253,23 @@ void draw_material_selector(
         draw_ui_text(std::to_string(i + 1), sx + 7.0F, y + swatch + 4.0F, 5.0F, width, height);
     }
 
+    core_begin(kCoreQuads);
+    for (int i = 0; i < kMaterialCount; ++i) {
+        const MaterialSlot slot = material_slot(material_library, i);
+        const float sx = x + (static_cast<float>(i) * (swatch + gap));
+        for (int channel_index = 0; channel_index < kMaterialTextureChannelCount; ++channel_index) {
+            const auto channel = static_cast<MaterialTextureChannel>(channel_index);
+            if (!material_texture_source_has_texture(material_texture_source(slot, channel))) {
+                continue;
+            }
+            const float marker_x = sx + 3.0F + (static_cast<float>(channel_index) * 4.0F);
+            const float marker_y = y + swatch - 5.0F;
+            core_color4f(0.95F, 0.98F, 0.72F, 0.96F);
+            draw_screen_quad(marker_x, marker_y, 3.0F, 3.0F, width, height);
+        }
+    }
+    core_end();
+
     core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }

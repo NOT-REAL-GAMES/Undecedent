@@ -67,6 +67,75 @@ Vec3 normalized_vec3(const Vec3 value) {
     return Vec3{value.x / length, value.y / length, value.z / length};
 }
 
+Vec3 sub_vec3_local(const Vec3 a, const Vec3 b) {
+    return Vec3{a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+Vec3 mul_vec3_local(const Vec3 value, const float scale) {
+    return Vec3{value.x * scale, value.y * scale, value.z * scale};
+}
+
+float dot_vec3_local(const Vec3 a, const Vec3 b) {
+    return (a.x * b.x) + (a.y * b.y) + (a.z * b.z);
+}
+
+Vec3 cross_vec3_local(const Vec3 a, const Vec3 b) {
+    return Vec3{
+        (a.y * b.z) - (a.z * b.y),
+        (a.z * b.x) - (a.x * b.z),
+        (a.x * b.y) - (a.y * b.x),
+    };
+}
+
+Vec3 orthogonalized(const Vec3 value, const Vec3 normal) {
+    return normalized_vec3(sub_vec3_local(value, mul_vec3_local(normal, dot_vec3_local(value, normal))));
+}
+
+void fallback_tangent_basis(const Vec3 normal, Vec3& tangent, Vec3& bitangent) {
+    const Vec3 helper = std::abs(normal.y) < 0.9F ? Vec3{0.0F, 1.0F, 0.0F} : Vec3{1.0F, 0.0F, 0.0F};
+    tangent = normalized_vec3(cross_vec3_local(helper, normal));
+    bitangent = normalized_vec3(cross_vec3_local(normal, tangent));
+}
+
+void triangle_tangent_basis(
+    const RuntimeTriangle& triangle,
+    const Vec2 uv_a,
+    const Vec2 uv_b,
+    const Vec2 uv_c,
+    const Vec3 normal,
+    Vec3& tangent,
+    Vec3& bitangent
+) {
+    const Vec3 edge_ab = sub_vec3_local(triangle.b, triangle.a);
+    const Vec3 edge_ac = sub_vec3_local(triangle.c, triangle.a);
+    const float du_ab = uv_b.x - uv_a.x;
+    const float dv_ab = uv_b.y - uv_a.y;
+    const float du_ac = uv_c.x - uv_a.x;
+    const float dv_ac = uv_c.y - uv_a.y;
+    const float determinant = (du_ab * dv_ac) - (du_ac * dv_ab);
+    if (std::abs(determinant) <= 0.000001F) {
+        fallback_tangent_basis(normal, tangent, bitangent);
+        return;
+    }
+
+    const float inv_det = 1.0F / determinant;
+    tangent = Vec3{
+        ((edge_ab.x * dv_ac) - (edge_ac.x * dv_ab)) * inv_det,
+        ((edge_ab.y * dv_ac) - (edge_ac.y * dv_ab)) * inv_det,
+        ((edge_ab.z * dv_ac) - (edge_ac.z * dv_ab)) * inv_det,
+    };
+    bitangent = Vec3{
+        ((edge_ac.x * du_ab) - (edge_ab.x * du_ac)) * inv_det,
+        ((edge_ac.y * du_ab) - (edge_ab.y * du_ac)) * inv_det,
+        ((edge_ac.z * du_ab) - (edge_ab.z * du_ac)) * inv_det,
+    };
+    tangent = orthogonalized(tangent, normal);
+    bitangent = normalized_vec3(cross_vec3_local(normal, tangent));
+    if (dot_vec3_local(bitangent, bitangent) <= 0.0001F) {
+        fallback_tangent_basis(normal, tangent, bitangent);
+    }
+}
+
 Vec3 runtime_triangle_area_normal(const RuntimeTriangle& triangle) {
     const Vec3 edge_ab{
         triangle.b.x - triangle.a.x,
@@ -94,6 +163,8 @@ void append_runtime_vertex(
     const Vec3 point,
     const MaterialSlot& material,
     const Vec3 normal,
+    const Vec3 tangent,
+    const Vec3 bitangent,
     const Vec2 uv,
     const int material_id
 ) {
@@ -114,6 +185,12 @@ void append_runtime_vertex(
         uv.x / uv_scale,
         uv.y / uv_scale,
         static_cast<float>(clamped_material_id(material_id)),
+        tangent.x,
+        tangent.y,
+        tangent.z,
+        bitangent.x,
+        bitangent.y,
+        bitangent.z,
     });
 }
 
@@ -126,6 +203,17 @@ void append_runtime_triangle(
     const RuntimeTriangle& triangle = tagged_triangle.triangle;
     const MaterialSlot& material = normalized_slot(material_library, tagged_triangle.material_id);
     const Vec3 face_normal = runtime_triangle_lighting_normal(triangle);
+    Vec3 tangent{};
+    Vec3 bitangent{};
+    triangle_tangent_basis(
+        triangle,
+        tagged_triangle.uv_a,
+        tagged_triangle.uv_b,
+        tagged_triangle.uv_c,
+        face_normal,
+        tangent,
+        bitangent
+    );
     const auto vertex_normal = [&](const Vec3 point) {
         if (!uses_smooth_normals(tagged_triangle)) {
             return face_normal;
@@ -133,9 +221,9 @@ void append_runtime_triangle(
         const auto found = smooth_normals.find(smooth_normal_key(tagged_triangle, point));
         return found == smooth_normals.end() ? face_normal : found->second;
     };
-    append_runtime_vertex(vertices, triangle.a, material, vertex_normal(triangle.a), tagged_triangle.uv_a, tagged_triangle.material_id);
-    append_runtime_vertex(vertices, triangle.b, material, vertex_normal(triangle.b), tagged_triangle.uv_b, tagged_triangle.material_id);
-    append_runtime_vertex(vertices, triangle.c, material, vertex_normal(triangle.c), tagged_triangle.uv_c, tagged_triangle.material_id);
+    append_runtime_vertex(vertices, triangle.a, material, vertex_normal(triangle.a), tangent, bitangent, tagged_triangle.uv_a, tagged_triangle.material_id);
+    append_runtime_vertex(vertices, triangle.b, material, vertex_normal(triangle.b), tangent, bitangent, tagged_triangle.uv_b, tagged_triangle.material_id);
+    append_runtime_vertex(vertices, triangle.c, material, vertex_normal(triangle.c), tangent, bitangent, tagged_triangle.uv_c, tagged_triangle.material_id);
 }
 
 std::map<SmoothNormalKey, Vec3> build_smooth_normals(const RuntimeWorld& world) {

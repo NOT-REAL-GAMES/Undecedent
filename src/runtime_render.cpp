@@ -116,9 +116,12 @@ in vec2 vTexCoord;
 flat in int vMaterialSlot;
 uniform sampler2DArray uMaterialAlbedo;
 layout(location = 0) out vec4 oColor;
+vec3 linear_to_display(vec3 color) {
+    return pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2));
+}
 void main() {
     vec3 texel = texture(uMaterialAlbedo, vec3(vTexCoord, float(vMaterialSlot))).rgb;
-    oColor = vec4(vColor * texel, 1.0);
+    oColor = vec4(linear_to_display(vColor * texel), 1.0);
 }
 )";
 
@@ -376,10 +379,13 @@ Mat4 game_view_projection_matrix(
 void draw_textured_runtime_arrays(
     const RuntimeRenderCache& render_cache,
     const Mat4& view_projection,
-    const GLuint material_texture_array,
+    const MaterialTextureArray* material_textures,
     const GLint first_vertex,
     const GLsizei vertex_count
 ) {
+    const GLuint material_texture_array = material_textures == nullptr
+        ? 0
+        : material_texture_array_id(*material_textures, MaterialTextureChannel::Albedo);
     if (material_texture_array == 0 || !ensure_forward_runtime_program()) {
         core_draw_colored_arrays(
             GL_TRIANGLES,
@@ -1114,7 +1120,7 @@ int draw_runtime_world(
     const bool draw_wire_overlay,
     const bool filter_connected_visibility,
     const GameRenderConfig& config,
-    const GLuint material_texture_array
+    const MaterialTextureArray* material_textures
 ) {
     if (width <= 0 || height <= 0) {
         return 0;
@@ -1146,7 +1152,7 @@ int draw_runtime_world(
             draw_textured_runtime_arrays(
                 render_cache,
                 view_projection,
-                material_texture_array,
+                material_textures,
                 0,
                 render_cache.total_vertices
             );
@@ -1163,7 +1169,7 @@ int draw_runtime_world(
                 draw_textured_runtime_arrays(
                     render_cache,
                     view_projection,
-                    material_texture_array,
+                    material_textures,
                     range.first_vertex,
                     range.vertex_count
                 );
@@ -1205,7 +1211,7 @@ int draw_deferred_runtime_world(
     const GameCamera& camera,
     const bool draw_wire_overlay,
     const GameRenderConfig& config,
-    const GLuint material_texture_array
+    const MaterialTextureArray* material_textures
 ) {
     renderer.last_gbuffer_ms = 0.0;
     renderer.last_shadow_pack_upload_ms = 0.0;
@@ -1213,7 +1219,8 @@ int draw_deferred_runtime_world(
     renderer.last_screen_shadow_ms = 0.0;
     renderer.last_lighting_ms = 0.0;
     renderer.last_wire_overlay_ms = 0.0;
-    if (material_texture_array == 0 ||
+    if (material_textures == nullptr ||
+        material_texture_array_id(*material_textures, MaterialTextureChannel::Albedo) == 0 ||
         !ensure_deferred_renderer(renderer, width, height) ||
         render_cache.vertex_buffer == 0 || render_cache.total_vertices <= 0) {
         return draw_runtime_world(
@@ -1225,7 +1232,7 @@ int draw_deferred_runtime_world(
             draw_wire_overlay,
             true,
             config,
-            material_texture_array
+            material_textures
         );
     }
 
@@ -1334,8 +1341,20 @@ int draw_deferred_runtime_world(
     glUseProgram(renderer.geometry_program);
     glUniformMatrix4fv(renderer.geometry_uniforms.view_projection, 1, GL_FALSE, view_projection.m.data());
     glActiveTexture(GL_TEXTURE7);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array_id(*material_textures, MaterialTextureChannel::Albedo));
     glUniform1i(renderer.geometry_uniforms.material_albedo, 7);
+    glActiveTexture(GL_TEXTURE8);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array_id(*material_textures, MaterialTextureChannel::Normal));
+    glUniform1i(renderer.geometry_uniforms.material_normal, 8);
+    glActiveTexture(GL_TEXTURE9);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array_id(*material_textures, MaterialTextureChannel::Smoothness));
+    glUniform1i(renderer.geometry_uniforms.material_smoothness, 9);
+    glActiveTexture(GL_TEXTURE10);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array_id(*material_textures, MaterialTextureChannel::AmbientOcclusion));
+    glUniform1i(renderer.geometry_uniforms.material_ao, 10);
+    glActiveTexture(GL_TEXTURE11);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array_id(*material_textures, MaterialTextureChannel::Metallic));
+    glUniform1i(renderer.geometry_uniforms.material_metallic, 11);
     glBindVertexArray(renderer.geometry_vao);
     glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
     glEnableVertexAttribArray(0);
@@ -1344,6 +1363,8 @@ int draw_deferred_runtime_world(
     glEnableVertexAttribArray(3);
     glEnableVertexAttribArray(4);
     glEnableVertexAttribArray(5);
+    glEnableVertexAttribArray(6);
+    glEnableVertexAttribArray(7);
     glVertexAttribPointer(
         0,
         3,
@@ -1392,6 +1413,22 @@ int draw_deferred_runtime_world(
         sizeof(RuntimeRenderVertex),
         reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, material_slot))
     );
+    glVertexAttribPointer(
+        6,
+        3,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(RuntimeRenderVertex),
+        reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, tx))
+    );
+    glVertexAttribPointer(
+        7,
+        3,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(RuntimeRenderVertex),
+        reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, bx))
+    );
 
     if (!filter_visible_sectors) {
         glDrawArrays(GL_TRIANGLES, 0, render_cache.total_vertices);
@@ -1410,6 +1447,8 @@ int draw_deferred_runtime_world(
         }
     }
 
+    glDisableVertexAttribArray(7);
+    glDisableVertexAttribArray(6);
     glDisableVertexAttribArray(5);
     glDisableVertexAttribArray(4);
     glDisableVertexAttribArray(3);
@@ -1418,8 +1457,10 @@ int draw_deferred_runtime_world(
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
-    glActiveTexture(GL_TEXTURE7);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    for (GLenum unit = GL_TEXTURE7; unit <= GL_TEXTURE11; ++unit) {
+        glActiveTexture(unit);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    }
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

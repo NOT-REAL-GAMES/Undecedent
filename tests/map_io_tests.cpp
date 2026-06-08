@@ -802,7 +802,10 @@ int main() {
         materials.slots[2].metallic = 0.25F;
         materials.slots[2].specular = 0.15F;
         materials.slots[2].uv_scale = 128.0F;
-        materials.slots[2].albedo_texture_path = "textures/test_albedo.png";
+        undecedent::material_texture_source(
+            materials.slots[2],
+            undecedent::MaterialTextureChannel::Albedo
+        ).path = "textures/test_albedo.png";
         const undecedent::SaveMapResult saved =
             undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
         expect(saved.ok, "materials v2 map should save");
@@ -814,7 +817,11 @@ int main() {
         expect(std::abs(slot.metallic - 0.25F) <= 0.001F, "material metallic should round-trip");
         expect(std::abs(slot.specular - 0.15F) <= 0.001F, "material specular should round-trip");
         expect(std::abs(slot.uv_scale - 128.0F) <= 0.001F, "material UV scale should round-trip");
-        expect(slot.albedo_texture_path == "textures/test_albedo.png", "texture path should round-trip");
+        expect(
+            undecedent::material_texture_source(slot, undecedent::MaterialTextureChannel::Albedo).path ==
+                "textures/test_albedo.png",
+            "texture path should round-trip"
+        );
         std::filesystem::remove(path);
     }
 
@@ -835,18 +842,68 @@ int main() {
         expect(saved.ok, "embedded material texture map should save");
         const std::string material_texture_payload = chunk_payload(path, "MTEX", 2);
         expect(!material_texture_payload.empty(), "embedded material texture should write MTEX chunk");
-        expect(read_payload_u32(material_texture_payload, 0) == 2, "embedded texture should write MTEX v2");
+        expect(read_payload_u32(material_texture_payload, 0) == 3, "embedded texture should write MTEX v3");
         expect(read_payload_u32(material_texture_payload, 4) == 0, "source texture should store SDL image codec");
         expect(read_payload_u32(material_texture_payload, 8) == 0, "tiny texture should stay uncompressed");
-        expect(read_payload_u64(material_texture_payload, 16) == 7, "MTEX v2 should record uncompressed byte count");
-        expect(read_payload_u64(material_texture_payload, 24) == 7, "MTEX v2 should record stored byte count");
+        expect(read_payload_u64(material_texture_payload, 16) == 7, "MTEX v3 should record uncompressed byte count");
+        expect(read_payload_u64(material_texture_payload, 24) == 7, "MTEX v3 should record stored byte count");
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "embedded material texture map should load");
         const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 2);
-        expect(slot.albedo_texture_path == "textures/test_albedo.png", "embedded texture path should round-trip");
-        expect(slot.albedo_texture_name == "test_albedo.png", "embedded texture name should round-trip");
-        expect(slot.albedo_texture_bytes == std::vector<std::uint8_t>({0x89, 'P', 'N', 'G', 1, 2, 3}),
+        const undecedent::MaterialTextureSource& albedo =
+            undecedent::material_texture_source(slot, undecedent::MaterialTextureChannel::Albedo);
+        expect(albedo.path == "textures/test_albedo.png", "embedded texture path should round-trip");
+        expect(albedo.name == "test_albedo.png", "embedded texture name should round-trip");
+        expect(albedo.bytes == std::vector<std::uint8_t>({0x89, 'P', 'N', 'G', 1, 2, 3}),
             "embedded texture bytes should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_channels.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        for (int channel_index = 0; channel_index < undecedent::kMaterialTextureChannelCount; ++channel_index) {
+            const auto channel = static_cast<undecedent::MaterialTextureChannel>(channel_index);
+            const std::string short_label = undecedent::material_texture_channel_short_label(channel);
+            undecedent::set_material_texture(
+                materials,
+                2,
+                channel,
+                "textures/channel_" + short_label + ".bin",
+                "channel_" + short_label + ".bin",
+                std::vector<std::uint8_t>{
+                    static_cast<std::uint8_t>(10 + channel_index),
+                    static_cast<std::uint8_t>(20 + channel_index)
+                }
+            );
+        }
+
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "multi-channel material texture map should save");
+        expect(chunk_count_for(path, "MTEX") == undecedent::kMaterialTextureChannelCount,
+            "multi-channel material texture map should write one texture chunk per channel");
+
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "multi-channel material texture map should load");
+        const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 2);
+        for (int channel_index = 0; channel_index < undecedent::kMaterialTextureChannelCount; ++channel_index) {
+            const auto channel = static_cast<undecedent::MaterialTextureChannel>(channel_index);
+            const std::string short_label = undecedent::material_texture_channel_short_label(channel);
+            const undecedent::MaterialTextureSource& source =
+                undecedent::material_texture_source(slot, channel);
+            expect(source.path == "textures/channel_" + short_label + ".bin",
+                "multi-channel texture path should round-trip");
+            expect(source.name == "channel_" + short_label + ".bin",
+                "multi-channel texture name should round-trip");
+            expect(source.bytes == std::vector<std::uint8_t>({
+                    static_cast<std::uint8_t>(10 + channel_index),
+                    static_cast<std::uint8_t>(20 + channel_index)
+                }),
+                "multi-channel texture bytes should round-trip");
+        }
         std::filesystem::remove(path);
     }
 
@@ -861,7 +918,7 @@ int main() {
             undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
         expect(saved.ok, "compressed material texture map should save");
         const std::string material_texture_payload = chunk_payload(path, "MTEX", 2);
-        expect(read_payload_u32(material_texture_payload, 0) == 2, "compressed texture should write MTEX v2");
+        expect(read_payload_u32(material_texture_payload, 0) == 3, "compressed texture should write MTEX v3");
         expect(read_payload_u32(material_texture_payload, 8) == 1, "repeated texture bytes should use LZMA2");
         expect(read_payload_u64(material_texture_payload, 16) == repeated_bytes.size(),
             "compressed MTEX should record original byte count");
@@ -869,7 +926,11 @@ int main() {
             "compressed MTEX should store fewer bytes");
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "compressed material texture map should load");
-        expect(undecedent::material_slot(loaded.material_library, 2).albedo_texture_bytes == repeated_bytes,
+        expect(
+            undecedent::material_texture_source(
+                undecedent::material_slot(loaded.material_library, 2),
+                undecedent::MaterialTextureChannel::Albedo
+            ).bytes == repeated_bytes,
             "compressed material texture bytes should round-trip");
         std::filesystem::remove(path);
     }
@@ -886,22 +947,27 @@ int main() {
             "generated.jxl",
             generated_jxl_bytes()
         );
-        materials.slots[5].texture_storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossless;
+        undecedent::material_texture_source(
+            materials.slots[5],
+            undecedent::MaterialTextureChannel::Albedo
+        ).storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossless;
         const undecedent::SaveMapResult saved =
             undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
         expect(saved.ok, "JXL-lossless material texture map should save");
         const std::string material_texture_payload = chunk_payload(path, "MTEX", 5);
-        expect(read_payload_u32(material_texture_payload, 0) == 2, "JXL texture should write MTEX v2");
+        expect(read_payload_u32(material_texture_payload, 0) == 3, "JXL texture should write MTEX v3");
         expect(read_payload_u32(material_texture_payload, 4) == 1, "JXL texture should store JPEG XL image codec");
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "JXL material texture map should load");
         const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 5);
-        expect(slot.albedo_texture_codec == undecedent::MaterialTextureImageCodec::JpegXl,
+        const undecedent::MaterialTextureSource& jxl =
+            undecedent::material_texture_source(slot, undecedent::MaterialTextureChannel::Albedo);
+        expect(jxl.codec == undecedent::MaterialTextureImageCodec::JpegXl,
             "JXL material texture codec should round-trip");
         undecedent::DecodedTextureImage decoded;
         std::string decode_message;
         expect(
-            undecedent::decode_texture_image_bytes(slot.albedo_texture_codec, slot.albedo_texture_bytes, slot.albedo_texture_name, decoded, decode_message),
+            undecedent::decode_texture_image_bytes(jxl.codec, jxl.bytes, jxl.name, decoded, decode_message),
             "JXL material texture bytes should decode after load"
         );
         expect(decoded.width == 2 && decoded.height == 2, "JXL material texture dimensions should round-trip");
@@ -915,7 +981,10 @@ int main() {
         SectorPlane sector;
         sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
         undecedent::MaterialLibrary materials = undecedent::default_material_library();
-        materials.slots[3].albedo_texture_path = texture_path.filename().generic_string();
+        undecedent::material_texture_source(
+            materials.slots[3],
+            undecedent::MaterialTextureChannel::Albedo
+        ).path = texture_path.filename().generic_string();
         const undecedent::SaveMapResult saved =
             undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
         expect(saved.ok, "path-only material texture map should save");
@@ -923,8 +992,10 @@ int main() {
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "path-migrated material texture map should load");
         const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 3);
-        expect(slot.albedo_texture_name == texture_path.filename().generic_string(), "path-migrated texture should store source name");
-        expect(slot.albedo_texture_bytes == std::vector<std::uint8_t>({10, 20, 30, 40}),
+        const undecedent::MaterialTextureSource& migrated =
+            undecedent::material_texture_source(slot, undecedent::MaterialTextureChannel::Albedo);
+        expect(migrated.name == texture_path.filename().generic_string(), "path-migrated texture should store source name");
+        expect(migrated.bytes == std::vector<std::uint8_t>({10, 20, 30, 40}),
             "path-migrated texture should store source bytes");
         std::filesystem::remove(path);
         std::filesystem::remove(texture_path);
@@ -935,7 +1006,10 @@ int main() {
         SectorPlane sector;
         sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
         undecedent::MaterialLibrary materials = undecedent::default_material_library();
-        materials.slots[4].albedo_texture_path = "missing_texture.png";
+        undecedent::material_texture_source(
+            materials.slots[4],
+            undecedent::MaterialTextureChannel::Albedo
+        ).path = "missing_texture.png";
         const undecedent::SaveMapResult saved =
             undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
         expect(saved.ok, "missing path-only material texture should not fail save");
@@ -943,7 +1017,11 @@ int main() {
         expect(chunk_count_for(path, "MTEX") == 0, "missing path-only material texture should not write MTEX");
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "missing path-only material texture map should load");
-        expect(undecedent::material_slot(loaded.material_library, 4).albedo_texture_path == "missing_texture.png",
+        expect(
+            undecedent::material_texture_source(
+                undecedent::material_slot(loaded.material_library, 4),
+                undecedent::MaterialTextureChannel::Albedo
+            ).path == "missing_texture.png",
             "missing path-only material texture should retain fallback path");
         std::filesystem::remove(path);
     }
@@ -966,8 +1044,10 @@ int main() {
         const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
         expect(loaded.ok, "dirty material texture map should load");
         const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 1);
-        expect(slot.albedo_texture_name == "second.bin", "dirty material texture save should rewrite name");
-        expect(slot.albedo_texture_bytes == std::vector<std::uint8_t>({2, 3}),
+        const undecedent::MaterialTextureSource& dirty_albedo =
+            undecedent::material_texture_source(slot, undecedent::MaterialTextureChannel::Albedo);
+        expect(dirty_albedo.name == "second.bin", "dirty material texture save should rewrite name");
+        expect(dirty_albedo.bytes == std::vector<std::uint8_t>({2, 3}),
             "dirty material texture save should rewrite bytes");
 
         undecedent::clear_material_texture_path(materials, 1);

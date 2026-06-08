@@ -3,6 +3,7 @@
 #include "undecedent/deferred_renderer.hpp"
 #include "undecedent/game_camera.hpp"
 #include "undecedent/geometry.hpp"
+#include "undecedent/material_texture.hpp"
 #include "undecedent/runtime_render_cache.hpp"
 #include "undecedent/runtime_world.hpp"
 
@@ -53,7 +54,7 @@ int draw_runtime_world(
     bool draw_wire_overlay,
     bool filter_connected_visibility,
     const GameRenderConfig& config,
-    GLuint material_texture_array = 0
+    const MaterialTextureArray* material_textures = nullptr
 );
 
 int draw_deferred_runtime_world(
@@ -67,7 +68,7 @@ int draw_deferred_runtime_world(
     const GameCamera& camera,
     bool draw_wire_overlay,
     const GameRenderConfig& config,
-    GLuint material_texture_array = 0
+    const MaterialTextureArray* material_textures = nullptr
 );
 
 } // namespace undecedent

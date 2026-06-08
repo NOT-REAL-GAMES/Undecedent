@@ -186,27 +186,21 @@ float coverage_at(vec2 uv, float pixel_bias, float softness) {
     return coverage_from_distance(signed_distance + pixel_bias, pixel_width);
 }
 void main() {
-    vec2 subpixel_step = dFdx(vUv) * 0.3333333;
     float center_distance = signed_distance_at(vUv);
     float pixel_width = max(fwidth(center_distance), 0.0008);
 
-    float fill_r = coverage_at(vUv - subpixel_step, 0.0, 1.0);
-    float fill_g = coverage_at(vUv, 0.0, 1.0);
-    float fill_b = coverage_at(vUv + subpixel_step, 0.0, 1.0);
-    vec3 fill_coverage = vec3(fill_r, fill_g, fill_b);
-    float fill_alpha = max(max(fill_r, fill_g), fill_b);
+    float fill_alpha = coverage_from_distance(center_distance, pixel_width);
+    float outline_alpha = coverage_from_distance(center_distance + pixel_width * 1.25, pixel_width);
+    float outline_only = max(outline_alpha - fill_alpha, 0.0);
 
-    float outline_alpha = max(coverage_from_distance(center_distance + pixel_width * 1.35, pixel_width), fill_alpha);
-    float outline_only = max(outline_alpha - fill_alpha, 0.0) * 0.96;
-
-    vec2 shadow_uv = vUv + dFdx(vUv) * 1.15 + dFdy(vUv) * 1.35;
+    vec2 shadow_uv = vUv + dFdx(vUv) * 1.25 + dFdy(vUv) * 1.45;
     float shadow_distance = signed_distance_at(shadow_uv);
-    float shadow_alpha = coverage_from_distance(shadow_distance + pixel_width * 2.4, pixel_width * 2.4) * 0.42;
-    shadow_alpha *= 1.0 - fill_alpha;
+    float shadow_alpha = coverage_from_distance(shadow_distance + pixel_width * 2.1, pixel_width * 2.2) * 0.36;
+    shadow_alpha *= 1.0 - max(fill_alpha, outline_only);
 
-    vec3 premultiplied_fill = vColor.rgb * fill_coverage * vColor.a;
-    float alpha = max(max(shadow_alpha, outline_only), fill_alpha * vColor.a);
-    oColor = vec4(premultiplied_fill, alpha);
+    vec3 fill = vColor.rgb * fill_alpha * vColor.a;
+    float alpha = max(max(shadow_alpha, outline_only * 0.96), fill_alpha * vColor.a);
+    oColor = vec4(fill, alpha);
 }
 )";
 

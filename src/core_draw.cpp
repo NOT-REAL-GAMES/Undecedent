@@ -35,6 +35,9 @@ struct CoreDrawState {
         std::vector<CoreVertex> vertices;
     };
     std::vector<Batch> batches;
+    std::vector<CoreVertex> flush_vertices;
+    std::vector<GLint> flush_first_vertices;
+    std::vector<GLsizei> flush_vertex_counts;
     int screen_width = 1;
     int screen_height = 1;
     bool initialized = false;
@@ -366,28 +369,55 @@ void core_draw_flush() {
         return;
     }
 
+    std::size_t total_vertices = 0;
+    for (const CoreDrawState::Batch& batch : draw.batches) {
+        total_vertices += batch.vertices.size();
+    }
+    if (total_vertices == 0) {
+        draw.batches.clear();
+        return;
+    }
+    draw.flush_vertices.clear();
+    draw.flush_first_vertices.clear();
+    draw.flush_vertex_counts.clear();
+    draw.flush_vertices.reserve(total_vertices);
+    draw.flush_first_vertices.reserve(draw.batches.size());
+    draw.flush_vertex_counts.reserve(draw.batches.size());
+    for (const CoreDrawState::Batch& batch : draw.batches) {
+        draw.flush_first_vertices.push_back(static_cast<GLint>(draw.flush_vertices.size()));
+        draw.flush_vertex_counts.push_back(static_cast<GLsizei>(batch.vertices.size()));
+        draw.flush_vertices.insert(draw.flush_vertices.end(), batch.vertices.begin(), batch.vertices.end());
+    }
+
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(draw.program);
     glBindVertexArray(draw.vao);
     glBindBuffer(GL_ARRAY_BUFFER, draw.vbo);
     bind_core_vertex_layout(sizeof(CoreVertex), offsetof(CoreVertex, x), offsetof(CoreVertex, r), 4);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(draw.flush_vertices.size() * sizeof(CoreVertex)),
+        draw.flush_vertices.data(),
+        GL_STREAM_DRAW
+    );
 
-    for (const CoreDrawState::Batch& batch : draw.batches) {
-        if (batch.vertices.empty()) {
+    std::array<float, 16> active_mvp{};
+    bool has_active_mvp = false;
+    for (std::size_t batch_index = 0; batch_index < draw.batches.size(); ++batch_index) {
+        const CoreDrawState::Batch& batch = draw.batches[batch_index];
+        if (draw.flush_vertex_counts[batch_index] <= 0) {
             continue;
         }
-        glUniformMatrix4fv(draw.mvp_uniform, 1, GL_FALSE, batch.mvp.data());
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            static_cast<GLsizeiptr>(batch.vertices.size() * sizeof(CoreVertex)),
-            batch.vertices.data(),
-            GL_STREAM_DRAW
-        );
+        if (!has_active_mvp || active_mvp != batch.mvp) {
+            glUniformMatrix4fv(draw.mvp_uniform, 1, GL_FALSE, batch.mvp.data());
+            active_mvp = batch.mvp;
+            has_active_mvp = true;
+        }
         if (batch.primitive == GL_LINES) {
             glLineWidth(std::max(1.0F, draw.line_width));
         }
-        glDrawArrays(batch.primitive, 0, static_cast<GLsizei>(batch.vertices.size()));
+        glDrawArrays(batch.primitive, draw.flush_first_vertices[batch_index], draw.flush_vertex_counts[batch_index]);
     }
 
     glLineWidth(1.0F);

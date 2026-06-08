@@ -27,6 +27,12 @@ struct RuntimeRenderVertex {
     float u = 0.0F;
     float v = 0.0F;
     float material_slot = 0.0F;
+    float tx = 1.0F;
+    float ty = 0.0F;
+    float tz = 0.0F;
+    float bx = 0.0F;
+    float by = 0.0F;
+    float bz = 1.0F;
 };
 
 struct RuntimeRenderRange {

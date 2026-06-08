@@ -75,6 +75,8 @@ GLuint create_shader_program(
         glBindAttribLocation(program, 3, "aMaterial");
         glBindAttribLocation(program, 4, "aTexCoord");
         glBindAttribLocation(program, 5, "aMaterialSlot");
+        glBindAttribLocation(program, 6, "aTangent");
+        glBindAttribLocation(program, 7, "aBitangent");
     }
     glLinkProgram(program);
     glDeleteShader(vertex_shader);
@@ -181,9 +183,13 @@ layout(location = 2) in vec3 aNormal;
 layout(location = 3) in vec3 aMaterial;
 layout(location = 4) in vec2 aTexCoord;
 layout(location = 5) in float aMaterialSlot;
+layout(location = 6) in vec3 aTangent;
+layout(location = 7) in vec3 aBitangent;
 uniform mat4 uViewProjection;
 out vec3 vWorldPosition;
 out vec3 vNormal;
+out vec3 vTangent;
+out vec3 vBitangent;
 out vec3 vAlbedo;
 out vec3 vMaterial;
 out vec2 vTexCoord;
@@ -191,6 +197,8 @@ flat out int vMaterialSlot;
 void main() {
     vWorldPosition = aPosition;
     vNormal = normalize(aNormal);
+    vTangent = normalize(aTangent);
+    vBitangent = normalize(aBitangent);
     vAlbedo = aColor;
     vMaterial = aMaterial;
     vTexCoord = aTexCoord;
@@ -203,21 +211,39 @@ void main() {
 #version 430 core
 in vec3 vWorldPosition;
 in vec3 vNormal;
+in vec3 vTangent;
+in vec3 vBitangent;
 in vec3 vAlbedo;
 in vec3 vMaterial;
 in vec2 vTexCoord;
 flat in int vMaterialSlot;
 uniform sampler2DArray uMaterialAlbedo;
+uniform sampler2DArray uMaterialNormal;
+uniform sampler2DArray uMaterialSmoothness;
+uniform sampler2DArray uMaterialAo;
+uniform sampler2DArray uMaterialMetallic;
 layout(location = 0) out vec4 oPosition;
 layout(location = 1) out vec4 oNormal;
 layout(location = 2) out vec4 oAlbedo;
 layout(location = 3) out vec4 oMaterial;
 void main() {
+    vec3 normal = normalize(vNormal);
+    vec3 tangent = normalize(vTangent - normal * dot(vTangent, normal));
+    vec3 bitangent = normalize(vBitangent);
+    if (dot(bitangent, bitangent) < 0.0001) {
+        bitangent = normalize(cross(normal, tangent));
+    }
+    mat3 tbn = mat3(tangent, bitangent, normal);
+    vec3 tangent_normal = (texture(uMaterialNormal, vec3(vTexCoord, float(vMaterialSlot))).xyz * 2.0) - 1.0;
+    vec3 mapped_normal = normalize(tbn * tangent_normal);
+    float smoothness = texture(uMaterialSmoothness, vec3(vTexCoord, float(vMaterialSlot))).r;
+    float ao = texture(uMaterialAo, vec3(vTexCoord, float(vMaterialSlot))).r;
+    float metallic = texture(uMaterialMetallic, vec3(vTexCoord, float(vMaterialSlot))).r;
     oPosition = vec4(vWorldPosition, 1.0);
-    oNormal = vec4((normalize(vNormal) * 0.5) + 0.5, 1.0);
+    oNormal = vec4((mapped_normal * 0.5) + 0.5, 1.0);
     vec3 texel = texture(uMaterialAlbedo, vec3(vTexCoord, float(vMaterialSlot))).rgb;
     oAlbedo = vec4(vAlbedo * texel, 1.0);
-    oMaterial = vec4(vMaterial, 1.0);
+    oMaterial = vec4(clamp(1.0 - smoothness, 0.04, 1.0), clamp(metallic, 0.0, 1.0), vMaterial.b, clamp(ao, 0.0, 1.0));
 }
 )";
 
@@ -388,18 +414,6 @@ float sun_shadow_visibility(vec3 world_position, float camera_forward_distance) 
     }
     return visibility;
 }
-float diffuse_shadow_visibility(float shadow) {
-    return smoothstep(0.65, 1.0, shadow);
-}
-float specular_shadow_visibility(float shadow) {
-    return smoothstep(0.82, 1.0, shadow);
-}
-float diffuse_light_lobe(float ndotl) {
-    return ndotl * smoothstep(0.12, 0.45, ndotl);
-}
-float specular_light_lobe(float ndotl) {
-    return ndotl * smoothstep(0.35, 0.85, ndotl);
-}
 float distribution_ggx(float ndoth, float roughness) {
     float alpha = max(roughness * roughness, 0.001);
     float alpha2 = alpha * alpha;
@@ -417,51 +431,76 @@ vec3 fresnel_schlick(float hdotl, vec3 f0) {
     float fresnel = pow(1.0 - saturate(hdotl), 5.0);
     return f0 + ((vec3(1.0) - f0) * fresnel);
 }
+vec3 direct_ggx_brdf(
+    vec3 albedo,
+    float roughness,
+    float metallic,
+    float specular,
+    vec3 normal,
+    vec3 view_dir,
+    vec3 light_dir,
+    vec3 radiance,
+    float shadow
+) {
+    float ndotl = max(dot(normal, light_dir), 0.0);
+    if (ndotl <= 0.0 || shadow <= 0.0) {
+        return vec3(0.0);
+    }
+
+    vec3 half_dir = normalize(light_dir + view_dir);
+    float ndotv = max(dot(normal, view_dir), 0.0001);
+    float ndoth = max(dot(normal, half_dir), 0.0);
+    float hdotl = max(dot(half_dir, light_dir), 0.0);
+    vec3 f0 = mix(vec3(specular), albedo, metallic);
+    vec3 fresnel = fresnel_schlick(hdotl, f0);
+    float distribution = distribution_ggx(ndoth, roughness);
+    float visibility = visibility_smith_ggx(ndotv, ndotl, roughness);
+    vec3 specular_lobe = distribution * visibility * fresnel;
+    vec3 diffuse_lobe = ((vec3(1.0) - fresnel) * (1.0 - metallic) * albedo) / PI;
+    return (diffuse_lobe + specular_lobe) * radiance * ndotl * saturate(shadow);
+}
+vec3 linear_to_display(vec3 color) {
+    return pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2));
+}
 void main() {
     vec2 uv = gl_FragCoord.xy * uInvViewport;
     vec3 world_position = texture(uPosition, uv).xyz;
     vec3 encoded_normal = texture(uNormal, uv).xyz;
     vec3 albedo = texture(uAlbedo, uv).xyz;
-    vec3 material = texture(uMaterial, uv).xyz;
+    vec4 material = texture(uMaterial, uv);
     if (dot(albedo, albedo) <= 0.000001) {
-        oColor = vec4(0.02, 0.025, 0.03, 1.0);
+        oColor = vec4(linear_to_display(vec3(0.02, 0.025, 0.03)), 1.0);
         return;
     }
 
     float roughness = clamp(material.r, 0.04, 1.0);
     float metallic = clamp(material.g, 0.0, 1.0);
     float specular = clamp(material.b, 0.0, 1.0);
+    float ao = clamp(material.a, 0.0, 1.0);
     vec3 view_dir = normalize(uCameraPosition - world_position);
     vec3 normal = normalize((encoded_normal * 2.0) - 1.0);
     if (dot(normal, view_dir) < 0.0) {
         normal = -normal;
     }
-    float ndotv = max(dot(normal, view_dir), 0.0001);
-    vec3 f0 = mix(vec3(specular * 0.08), albedo, metallic);
-    vec3 diffuse_color = albedo * (1.0 - metallic);
-    vec3 color = diffuse_color * uAmbientColor;
+    vec3 color = albedo * (1.0 - metallic) * uAmbientColor * ao;
     float camera_forward_distance = dot(world_position - uCameraPosition, normalize(uCameraForward));
     if (uSunEnabled && uSunIntensity > 0.0) {
         vec3 sun_dir = normalize(-uSunDirection);
-        vec3 sun_half = normalize(sun_dir + view_dir);
-        float sun_ndotl = max(dot(normal, sun_dir), 0.0);
-        float sun_ndoth = max(dot(normal, sun_half), 0.0);
-        float sun_hdotl = max(dot(sun_half, sun_dir), 0.0);
-        float distribution = distribution_ggx(sun_ndoth, roughness);
-        float visibility = visibility_smith_ggx(ndotv, sun_ndotl, roughness);
-        vec3 fresnel = fresnel_schlick(sun_hdotl, f0);
-        vec3 specular_lobe = distribution * visibility * fresnel;
-        vec3 diffuse_lobe = diffuse_color / PI;
         float shadow = sun_shadow_visibility(world_position, camera_forward_distance);
         if (uScreenSpaceShadowsEnabled) {
             shadow = min(shadow, texture(uScreenShadowMask, uv).r);
         }
-        float diffuse_shadow = diffuse_shadow_visibility(shadow);
-        float specular_shadow = specular_shadow_visibility(shadow);
-        float diffuse_ndotl = diffuse_light_lobe(sun_ndotl * diffuse_shadow);
-        float specular_ndotl = specular_light_lobe(sun_ndotl * specular_shadow);
-        color += ((diffuse_lobe * diffuse_ndotl) +
-            (specular_lobe * specular_ndotl)) * uSunColor * uSunIntensity;
+        color += direct_ggx_brdf(
+            albedo,
+            roughness,
+            metallic,
+            specular,
+            normal,
+            view_dir,
+            sun_dir,
+            uSunColor * uSunIntensity,
+            shadow
+        );
     }
     for (int i = 0; i < MAX_POINT_LIGHTS; ++i) {
         if (i >= uLightCount) {
@@ -472,33 +511,29 @@ void main() {
         vec3 light_vector = light_position - world_position;
         float light_distance = length(light_vector);
         vec3 light_dir = light_distance > 0.0001 ? light_vector / light_distance : vec3(0.0, 1.0, 0.0);
-        vec3 half_dir = normalize(light_dir + view_dir);
-        float ndotl = max(dot(normal, light_dir), 0.0);
-        float ndoth = max(dot(normal, half_dir), 0.0);
-        float hdotl = max(dot(half_dir, light_dir), 0.0);
         float range = max(light.position_radius.w, 1.0);
         float attenuation = clamp(1.0 - (light_distance / range), 0.0, 1.0);
         attenuation *= attenuation;
         vec3 radiance = light.color_intensity.rgb * attenuation * light.color_intensity.a;
-        float distribution = distribution_ggx(ndoth, roughness);
-        float visibility = visibility_smith_ggx(ndotv, ndotl, roughness);
-        vec3 fresnel = fresnel_schlick(hdotl, f0);
-        vec3 specular_lobe = distribution * visibility * fresnel;
-        vec3 diffuse_lobe = diffuse_color / PI;
         float shadow = point_shadow_visibility(i, light_vector, light_distance, range);
-        float diffuse_shadow = diffuse_shadow_visibility(shadow);
-        float specular_shadow = specular_shadow_visibility(shadow);
-        float diffuse_ndotl = diffuse_light_lobe(ndotl * diffuse_shadow);
-        float specular_ndotl = specular_light_lobe(ndotl * specular_shadow);
-        color += ((diffuse_lobe * diffuse_ndotl) +
-            (specular_lobe * specular_ndotl)) * radiance;
+        color += direct_ggx_brdf(
+            albedo,
+            roughness,
+            metallic,
+            specular,
+            normal,
+            view_dir,
+            light_dir,
+            radiance,
+            shadow
+        );
     }
     if (uFogEnabled) {
         float fog_distance = length(world_position - uCameraPosition);
         float fog = smoothstep(uFogStartEnd.x, uFogStartEnd.y, fog_distance);
         color = mix(color, uFogColor, fog);
     }
-    oColor = vec4(color, 1.0);
+    oColor = vec4(linear_to_display(color), 1.0);
 }
 )";
 
@@ -721,6 +756,10 @@ void main() {
     }
     renderer.geometry_uniforms.view_projection = glGetUniformLocation(renderer.geometry_program, "uViewProjection");
     renderer.geometry_uniforms.material_albedo = glGetUniformLocation(renderer.geometry_program, "uMaterialAlbedo");
+    renderer.geometry_uniforms.material_normal = glGetUniformLocation(renderer.geometry_program, "uMaterialNormal");
+    renderer.geometry_uniforms.material_smoothness = glGetUniformLocation(renderer.geometry_program, "uMaterialSmoothness");
+    renderer.geometry_uniforms.material_ao = glGetUniformLocation(renderer.geometry_program, "uMaterialAo");
+    renderer.geometry_uniforms.material_metallic = glGetUniformLocation(renderer.geometry_program, "uMaterialMetallic");
     renderer.geometry_view_projection = renderer.geometry_uniforms.view_projection;
     cache_deferred_uniforms(renderer);
     return true;
@@ -888,7 +927,7 @@ bool ensure_deferred_renderer(DeferredRenderer& renderer, const int width, const
 
     renderer.position_texture = create_gbuffer_texture(width, height, GL_RGB16F, GL_RGB, GL_FLOAT);
     renderer.normal_texture = create_gbuffer_texture(width, height, GL_RGB16F, GL_RGB, GL_FLOAT);
-    renderer.albedo_texture = create_gbuffer_texture(width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+    renderer.albedo_texture = create_gbuffer_texture(width, height, GL_RGBA16F, GL_RGBA, GL_FLOAT);
     renderer.material_texture = create_gbuffer_texture(width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
 
     if (!renderer.screen_shadows_disabled) {
