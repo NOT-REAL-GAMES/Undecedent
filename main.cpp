@@ -1783,15 +1783,19 @@ int main() {
 
                 if (ctrl_down && (key == SDLK_Z || scancode == SDL_SCANCODE_Z) && !event.key.repeat && is_editor_mode(app_mode)) {
                     if (shift_down) {
-                        redo_editor_action(editor_world);
-                    } else {
-                        undo_editor_action(editor_world);
+                        if (redo_editor_action(editor_world)) {
+                            undecedent::mark_material_textures_dirty(material_textures);
+                        }
+                    } else if (undo_editor_action(editor_world)) {
+                        undecedent::mark_material_textures_dirty(material_textures);
                     }
                     continue;
                 }
 
                 if (ctrl_down && (key == SDLK_Y || scancode == SDL_SCANCODE_Y) && !event.key.repeat && is_editor_mode(app_mode)) {
-                    redo_editor_action(editor_world);
+                    if (redo_editor_action(editor_world)) {
+                        undecedent::mark_material_textures_dirty(material_textures);
+                    }
                     continue;
                 }
 
