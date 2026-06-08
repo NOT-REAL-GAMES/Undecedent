@@ -1,6 +1,5 @@
 #include "undecedent/material_texture.hpp"
 
-#include "undecedent/texture_compression.hpp"
 #include "undecedent/texture_image_codec.hpp"
 
 #include <SDL3/SDL.h>
@@ -134,23 +133,6 @@ bool load_embedded_texture_layer(const MaterialSlot& slot, std::uint8_t* pixels)
     );
 }
 
-bool material_libraries_match(const MaterialLibrary& a, const MaterialLibrary& b) {
-    for (int i = 0; i < kMaterialCount; ++i) {
-        const MaterialSlot& left = a.slots[static_cast<std::size_t>(i)];
-        const MaterialSlot& right = b.slots[static_cast<std::size_t>(i)];
-        if (left.albedo_texture_path != right.albedo_texture_path ||
-            left.albedo_texture_name != right.albedo_texture_name ||
-            left.albedo_texture_codec != right.albedo_texture_codec ||
-            left.texture_storage_mode != right.texture_storage_mode ||
-            left.jxl_quality != right.jxl_quality ||
-            left.albedo_texture_bytes.size() != right.albedo_texture_bytes.size() ||
-            crc32_bytes(left.albedo_texture_bytes) != crc32_bytes(right.albedo_texture_bytes)) {
-            return false;
-        }
-    }
-    return true;
-}
-
 } // namespace
 
 void mark_material_textures_dirty(MaterialTextureArray& textures) {
@@ -162,10 +144,11 @@ bool ensure_material_texture_array(MaterialTextureArray& textures, const Materia
         return false;
     }
 
-    const MaterialLibrary normalized = normalized_material_library(library);
-    if (textures.texture != 0 && !textures.dirty && material_libraries_match(textures.uploaded_library, normalized)) {
+    if (textures.texture != 0 && !textures.dirty) {
         return true;
     }
+
+    const MaterialLibrary normalized = normalized_material_library(library);
 
     std::vector<std::uint8_t> pixels(
         static_cast<std::size_t>(kMaterialTextureSize) *
