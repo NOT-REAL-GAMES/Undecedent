@@ -350,6 +350,27 @@ int main() {
 
     {
         std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
+        const undecedent::RuntimeWorld world = undecedent::build_runtime_world(sectors);
+        bool found_ceiling_uv = false;
+        bool found_wall_uv = false;
+        for (const undecedent::RuntimeTaggedTriangle& triangle : world.triangles) {
+            if (triangle.surface.kind == undecedent::RuntimeSurfaceKind::Ceiling) {
+                expect(triangle.uv_a.x == triangle.triangle.a.x &&
+                    triangle.uv_a.y == -triangle.triangle.a.z,
+                    "runtime ceiling UVs should flip world Z for image-space texture Y");
+                found_ceiling_uv = true;
+            }
+            if (triangle.surface.kind == undecedent::RuntimeSurfaceKind::Wall &&
+                triangle.uv_b.y < triangle.uv_a.y) {
+                found_wall_uv = true;
+            }
+        }
+        expect(found_ceiling_uv, "runtime world should emit ceiling UVs");
+        expect(found_wall_uv, "runtime wall UVs should flip vertical height for image-space texture Y");
+    }
+
+    {
+        std::vector<SectorPlane> sectors = add({}, loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}}));
         sectors.front().floor_material = 5;
         sectors.front().ceiling_material = 6;
         sectors.front().wall_materials = {1, 2, 3, 4};

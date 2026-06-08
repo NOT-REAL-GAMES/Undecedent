@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -140,7 +141,7 @@ using undecedent::sector_at_point;
 using undecedent::sector_visible_in_slice;
 using undecedent::select_single_sector;
 using undecedent::clear_material_texture_path;
-using undecedent::set_material_texture_path;
+using undecedent::set_material_texture;
 using undecedent::script_editor_apply_dirty_before_save;
 using undecedent::script_editor_apply_current;
 using undecedent::script_editor_backspace;
@@ -465,7 +466,37 @@ enum class MaterialTextureControlAction {
     None,
     Assign,
     Clear,
+    CycleStorage,
 };
+
+const char* material_texture_storage_mode_label(const undecedent::MaterialTextureStorageMode mode) {
+    switch (mode) {
+    case undecedent::MaterialTextureStorageMode::JpegXlLossless:
+        return "JXL-L";
+    case undecedent::MaterialTextureStorageMode::JpegXlLossy:
+        return "JXL-Q80";
+    case undecedent::MaterialTextureStorageMode::SourceBytes:
+    default:
+        return "SRC";
+    }
+}
+
+void cycle_material_texture_storage_mode(undecedent::MaterialSlot& slot) {
+    switch (slot.texture_storage_mode) {
+    case undecedent::MaterialTextureStorageMode::SourceBytes:
+        slot.texture_storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossless;
+        break;
+    case undecedent::MaterialTextureStorageMode::JpegXlLossless:
+        slot.texture_storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossy;
+        slot.jxl_quality = 80;
+        break;
+    case undecedent::MaterialTextureStorageMode::JpegXlLossy:
+    default:
+        slot.texture_storage_mode = undecedent::MaterialTextureStorageMode::SourceBytes;
+        slot.jxl_quality = 80;
+        break;
+    }
+}
 
 MaterialTextureControlAction material_texture_control_at(
     const int height,
@@ -485,6 +516,16 @@ MaterialTextureControlAction material_texture_control_at(
             layout.button_h
         )) {
         return MaterialTextureControlAction::Clear;
+    }
+    if (point_in_screen_rect(
+            mouse_x,
+            mouse_y,
+            layout.x + ((layout.button_w + layout.gap) * 2.0F),
+            layout.y,
+            layout.button_w,
+            layout.button_h
+        )) {
+        return MaterialTextureControlAction::CycleStorage;
     }
     return MaterialTextureControlAction::None;
 }
@@ -834,9 +875,23 @@ const SDL_DialogFileFilter* map_dialog_filters() {
 
 const SDL_DialogFileFilter* material_dialog_filters() {
     static const SDL_DialogFileFilter filters[] = {
-        {"Image Texture", "png;jpg;jpeg;bmp"},
+        {"Image Texture", "png;jpg;jpeg;bmp;jxl"},
     };
     return filters;
+}
+
+bool read_binary_file(const std::filesystem::path& path, std::vector<std::uint8_t>& bytes, std::string& message) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        message = "Could not open texture file: " + path.string();
+        return false;
+    }
+    bytes.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    if (bytes.empty()) {
+        message = "Texture file is empty: " + path.string();
+        return false;
+    }
+    return true;
 }
 
 void show_save_map_dialog(SDL_Window* window, MapDialogRequests& requests) {
@@ -1237,8 +1292,22 @@ void process_pending_material_dialogs(
         return;
     }
 
+    const std::filesystem::path texture_path = texture_path_string;
+    std::vector<std::uint8_t> texture_bytes;
+    std::string read_message;
+    if (!read_binary_file(texture_path, texture_bytes, read_message)) {
+        std::cout << read_message << '\n';
+        return;
+    }
+
     push_undo_snapshot(editor_world, "assign material texture");
-    set_material_texture_path(editor_world.material_library, material_id, texture_path_string);
+    set_material_texture(
+        editor_world.material_library,
+        material_id,
+        texture_path,
+        texture_path.filename().generic_string(),
+        std::move(texture_bytes)
+    );
     editor_world.dirty_materials = true;
     undecedent::mark_material_textures_dirty(material_textures);
     std::cout << "Assigned texture to material " << (material_id + 1) << ": " << texture_path_string << '\n';
@@ -1313,8 +1382,12 @@ void draw_material_texture_controls(const EditorWorld& editor_world, const int a
     };
 
     const int slot_id = undecedent::clamped_material_id(active_material);
+    const undecedent::MaterialSlot& slot =
+        editor_world.material_library.slots[static_cast<std::size_t>(slot_id)];
     const bool has_texture =
-        !editor_world.material_library.slots[static_cast<std::size_t>(slot_id)].albedo_texture_path.empty();
+        !slot.albedo_texture_path.empty() || !slot.albedo_texture_bytes.empty();
+    const bool compressed_mode =
+        slot.texture_storage_mode != undecedent::MaterialTextureStorageMode::SourceBytes;
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -1322,6 +1395,11 @@ void draw_material_texture_controls(const EditorWorld& editor_world, const int a
     core_set_line_width(1.25F);
     draw_button(layout.x, has_texture ? "TEXTURE*" : "TEXTURE", has_texture);
     draw_button(layout.x + layout.button_w + layout.gap, "CLEAR", false);
+    draw_button(
+        layout.x + ((layout.button_w + layout.gap) * 2.0F),
+        material_texture_storage_mode_label(slot.texture_storage_mode),
+        compressed_mode
+    );
     core_set_line_width(1.0F);
     glDisable(GL_BLEND);
 }
@@ -2072,6 +2150,18 @@ int main() {
                     editor_world.dirty_materials = true;
                     undecedent::mark_material_textures_dirty(material_textures);
                     std::cout << "Cleared texture for material " << (active_material + 1) << '\n';
+                    continue;
+                }
+                if (material_action == MaterialTextureControlAction::CycleStorage) {
+                    push_undo_snapshot(editor_world, "cycle material texture storage");
+                    undecedent::MaterialSlot& slot = editor_world.material_library.slots[
+                        static_cast<std::size_t>(undecedent::clamped_material_id(active_material))
+                    ];
+                    cycle_material_texture_storage_mode(slot);
+                    editor_world.dirty_materials = true;
+                    undecedent::mark_material_textures_dirty(material_textures);
+                    std::cout << "Material " << (active_material + 1) << " texture storage "
+                              << material_texture_storage_mode_label(slot.texture_storage_mode) << '\n';
                     continue;
                 }
                 if (handle_entity_dropdown_click(editor_world, width, height, event.button.x, event.button.y)) {

@@ -1,6 +1,7 @@
 #include "undecedent/map_io.hpp"
 
 #include "undecedent/displacement.hpp"
+#include "undecedent/texture_image_codec.hpp"
 
 #include <cstdlib>
 #include <cstdint>
@@ -36,6 +37,30 @@ std::filesystem::path test_path(const std::string& name) {
 void write_text(const std::filesystem::path& path, const std::string& text) {
     std::ofstream output(path);
     output << text;
+}
+
+void write_bytes(const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes) {
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+std::vector<std::uint8_t> generated_jxl_bytes() {
+    undecedent::DecodedTextureImage image;
+    image.width = 2;
+    image.height = 2;
+    image.rgba = {
+        255, 0, 0, 255,
+        0, 255, 0, 255,
+        0, 0, 255, 255,
+        255, 255, 0, 255,
+    };
+    std::vector<std::uint8_t> bytes;
+    std::string message;
+    expect(
+        undecedent::encode_jpeg_xl_rgba(image, true, 100, bytes, message),
+        "test helper should encode JPEG XL bytes"
+    );
+    return bytes;
 }
 
 bool file_starts_with(const std::filesystem::path& path, const std::string& prefix) {
@@ -88,6 +113,16 @@ std::uint64_t read_u64(const std::vector<unsigned char>& bytes, const std::size_
     return value;
 }
 
+std::uint32_t read_payload_u32(const std::string& payload, const std::size_t offset) {
+    const std::vector<unsigned char> bytes(payload.begin(), payload.end());
+    return read_u32(bytes, offset);
+}
+
+std::uint64_t read_payload_u64(const std::string& payload, const std::size_t offset) {
+    const std::vector<unsigned char> bytes(payload.begin(), payload.end());
+    return read_u64(bytes, offset);
+}
+
 std::uint32_t checksum_bytes(const std::string& text) {
     std::uint32_t crc = 0xFFFFFFFFU;
     for (const unsigned char byte : text) {
@@ -98,6 +133,24 @@ std::uint32_t checksum_bytes(const std::string& text) {
         }
     }
     return ~crc;
+}
+
+std::size_t chunk_count_for(const std::filesystem::path& path, const std::string& chunk_type) {
+    std::ifstream input(path, std::ios::binary);
+    std::vector<unsigned char> bytes(std::istreambuf_iterator<char>(input), {});
+    expect(bytes.size() >= 32, "chunked file should contain a header before count");
+    const std::uint32_t chunk_count = read_u32(bytes, 12);
+    constexpr std::size_t directory_offset = 32;
+    constexpr std::size_t entry_size = 56;
+    std::size_t matches = 0;
+    for (std::uint32_t i = 0; i < chunk_count; ++i) {
+        const std::size_t entry = directory_offset + (static_cast<std::size_t>(i) * entry_size);
+        const std::string type(reinterpret_cast<const char*>(&bytes[entry]), 4);
+        if (type == chunk_type) {
+            ++matches;
+        }
+    }
+    return matches;
 }
 
 void write_u32(std::vector<unsigned char>& bytes, const std::size_t offset, const std::uint32_t value) {
@@ -112,6 +165,32 @@ void write_u64(std::vector<unsigned char>& bytes, const std::size_t offset, cons
         bytes[offset + static_cast<std::size_t>(shift / 8)] =
             static_cast<unsigned char>((value >> shift) & 0xFFU);
     }
+}
+
+void set_chunk_id(
+    const std::filesystem::path& path,
+    const std::string& chunk_type,
+    const std::uint64_t old_id,
+    const std::uint64_t new_id
+) {
+    std::ifstream input(path, std::ios::binary);
+    std::vector<unsigned char> bytes(std::istreambuf_iterator<char>(input), {});
+    expect(bytes.size() >= 32, "chunked file should contain a header before id mutation");
+    const std::uint32_t chunk_count = read_u32(bytes, 12);
+    constexpr std::size_t directory_offset = 32;
+    constexpr std::size_t entry_size = 56;
+    for (std::uint32_t i = 0; i < chunk_count; ++i) {
+        const std::size_t entry = directory_offset + (static_cast<std::size_t>(i) * entry_size);
+        const std::string type(reinterpret_cast<const char*>(&bytes[entry]), 4);
+        const std::uint64_t id = read_u64(bytes, entry + 8);
+        if (type == chunk_type && id == old_id) {
+            write_u64(bytes, entry + 8, new_id);
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            return;
+        }
+    }
+    expect(false, "set_chunk_id helper could not find requested chunk");
 }
 
 std::string chunk_payload(const std::filesystem::path& path, const std::string& chunk_type, const std::uint64_t chunk_id) {
@@ -736,6 +815,251 @@ int main() {
         expect(std::abs(slot.specular - 0.15F) <= 0.001F, "material specular should round-trip");
         expect(std::abs(slot.uv_scale - 128.0F) <= 0.001F, "material UV scale should round-trip");
         expect(slot.albedo_texture_path == "textures/test_albedo.png", "texture path should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_embedded.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(
+            materials,
+            2,
+            "textures/test_albedo.png",
+            "test_albedo.png",
+            std::vector<std::uint8_t>{0x89, 'P', 'N', 'G', 1, 2, 3}
+        );
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "embedded material texture map should save");
+        const std::string material_texture_payload = chunk_payload(path, "MTEX", 2);
+        expect(!material_texture_payload.empty(), "embedded material texture should write MTEX chunk");
+        expect(read_payload_u32(material_texture_payload, 0) == 2, "embedded texture should write MTEX v2");
+        expect(read_payload_u32(material_texture_payload, 4) == 0, "source texture should store SDL image codec");
+        expect(read_payload_u32(material_texture_payload, 8) == 0, "tiny texture should stay uncompressed");
+        expect(read_payload_u64(material_texture_payload, 16) == 7, "MTEX v2 should record uncompressed byte count");
+        expect(read_payload_u64(material_texture_payload, 24) == 7, "MTEX v2 should record stored byte count");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "embedded material texture map should load");
+        const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 2);
+        expect(slot.albedo_texture_path == "textures/test_albedo.png", "embedded texture path should round-trip");
+        expect(slot.albedo_texture_name == "test_albedo.png", "embedded texture name should round-trip");
+        expect(slot.albedo_texture_bytes == std::vector<std::uint8_t>({0x89, 'P', 'N', 'G', 1, 2, 3}),
+            "embedded texture bytes should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_compressed.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        std::vector<std::uint8_t> repeated_bytes(4096, 42);
+        undecedent::set_material_texture(materials, 2, "textures/repeated.bin", "repeated.bin", repeated_bytes);
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "compressed material texture map should save");
+        const std::string material_texture_payload = chunk_payload(path, "MTEX", 2);
+        expect(read_payload_u32(material_texture_payload, 0) == 2, "compressed texture should write MTEX v2");
+        expect(read_payload_u32(material_texture_payload, 8) == 1, "repeated texture bytes should use LZMA2");
+        expect(read_payload_u64(material_texture_payload, 16) == repeated_bytes.size(),
+            "compressed MTEX should record original byte count");
+        expect(read_payload_u64(material_texture_payload, 24) < repeated_bytes.size(),
+            "compressed MTEX should store fewer bytes");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "compressed material texture map should load");
+        expect(undecedent::material_slot(loaded.material_library, 2).albedo_texture_bytes == repeated_bytes,
+            "compressed material texture bytes should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_jxl_lossless.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(
+            materials,
+            5,
+            "textures/generated.jxl",
+            "generated.jxl",
+            generated_jxl_bytes()
+        );
+        materials.slots[5].texture_storage_mode = undecedent::MaterialTextureStorageMode::JpegXlLossless;
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "JXL-lossless material texture map should save");
+        const std::string material_texture_payload = chunk_payload(path, "MTEX", 5);
+        expect(read_payload_u32(material_texture_payload, 0) == 2, "JXL texture should write MTEX v2");
+        expect(read_payload_u32(material_texture_payload, 4) == 1, "JXL texture should store JPEG XL image codec");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "JXL material texture map should load");
+        const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 5);
+        expect(slot.albedo_texture_codec == undecedent::MaterialTextureImageCodec::JpegXl,
+            "JXL material texture codec should round-trip");
+        undecedent::DecodedTextureImage decoded;
+        std::string decode_message;
+        expect(
+            undecedent::decode_texture_image_bytes(slot.albedo_texture_codec, slot.albedo_texture_bytes, slot.albedo_texture_name, decoded, decode_message),
+            "JXL material texture bytes should decode after load"
+        );
+        expect(decoded.width == 2 && decoded.height == 2, "JXL material texture dimensions should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_path_migration.udmap");
+        const std::filesystem::path texture_path = path.parent_path() / "undecedent_material_source.bin";
+        write_bytes(texture_path, std::vector<std::uint8_t>{10, 20, 30, 40});
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        materials.slots[3].albedo_texture_path = texture_path.filename().generic_string();
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "path-only material texture map should save");
+        expect(!chunk_payload(path, "MTEX", 3).empty(), "path-only material texture should embed when source exists");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "path-migrated material texture map should load");
+        const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 3);
+        expect(slot.albedo_texture_name == texture_path.filename().generic_string(), "path-migrated texture should store source name");
+        expect(slot.albedo_texture_bytes == std::vector<std::uint8_t>({10, 20, 30, 40}),
+            "path-migrated texture should store source bytes");
+        std::filesystem::remove(path);
+        std::filesystem::remove(texture_path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_missing_source.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        materials.slots[4].albedo_texture_path = "missing_texture.png";
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "missing path-only material texture should not fail save");
+        expect(saved.message.find("Warning:") != std::string::npos, "missing path-only material texture should warn");
+        expect(chunk_count_for(path, "MTEX") == 0, "missing path-only material texture should not write MTEX");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "missing path-only material texture map should load");
+        expect(undecedent::material_slot(loaded.material_library, 4).albedo_texture_path == "missing_texture.png",
+            "missing path-only material texture should retain fallback path");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_dirty.udmap");
+        SectorPlane sector;
+        sector.id = 500;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(materials, 1, "first.bin", "first.bin", std::vector<std::uint8_t>{1});
+        expect(undecedent::save_map_file({sector}, {}, {}, {}, materials, path).ok,
+            "dirty material texture setup should save");
+        undecedent::set_material_texture(materials, 1, "second.bin", "second.bin", std::vector<std::uint8_t>{2, 3});
+        undecedent::MapDirtyState dirty;
+        dirty.materials = true;
+        const undecedent::SaveMapResult dirty_saved =
+            undecedent::save_map_file_dirty({sector}, {}, {}, {}, materials, dirty, path);
+        expect(dirty_saved.ok, "dirty material texture save should succeed");
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "dirty material texture map should load");
+        const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 1);
+        expect(slot.albedo_texture_name == "second.bin", "dirty material texture save should rewrite name");
+        expect(slot.albedo_texture_bytes == std::vector<std::uint8_t>({2, 3}),
+            "dirty material texture save should rewrite bytes");
+
+        undecedent::clear_material_texture_path(materials, 1);
+        const undecedent::SaveMapResult clear_saved =
+            undecedent::save_map_file_dirty({sector}, {}, {}, {}, materials, dirty, path);
+        expect(clear_saved.ok, "dirty material texture clear should save");
+        expect(chunk_count_for(path, "MTEX") == 0, "dirty material texture clear should remove MTEX chunks");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_bad_id.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(materials, 2, "bad.bin", "bad.bin", std::vector<std::uint8_t>{1});
+        expect(undecedent::save_map_file({sector}, {}, {}, {}, materials, path).ok,
+            "bad material texture id setup should save");
+        set_chunk_id(path, "MTEX", 2, 99);
+        expect(!undecedent::load_map_file(path).ok, "out-of-range material texture chunk id should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_duplicate.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(materials, 1, "one.bin", "one.bin", std::vector<std::uint8_t>{1});
+        undecedent::set_material_texture(materials, 2, "two.bin", "two.bin", std::vector<std::uint8_t>{2});
+        expect(undecedent::save_map_file({sector}, {}, {}, {}, materials, path).ok,
+            "duplicate material texture setup should save");
+        set_chunk_id(path, "MTEX", 2, 1);
+        expect(!undecedent::load_map_file(path).ok, "duplicate material texture chunk should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_truncated.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(materials, 2, "truncated.bin", "truncated.bin", std::vector<std::uint8_t>{1, 2, 3});
+        expect(undecedent::save_map_file({sector}, {}, {}, {}, materials, path).ok,
+            "truncated material texture setup should save");
+        replace_last_chunk_payload(path, "MTEX", 2, std::string(4, '\0'));
+        expect(!undecedent::load_map_file(path).ok, "truncated material texture chunk should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_bad_codec.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(materials, 2, "bad.bin", "bad.bin", std::vector<std::uint8_t>{1, 2, 3});
+        expect(undecedent::save_map_file({sector}, {}, {}, {}, materials, path).ok,
+            "bad material texture codec setup should save");
+        std::string payload = chunk_payload(path, "MTEX", 2);
+        payload[4] = static_cast<char>(99);
+        replace_last_chunk_payload(path, "MTEX", 2, payload);
+        expect(!undecedent::load_map_file(path).ok, "invalid material texture image codec should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_bad_compression.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(materials, 2, "bad.bin", "bad.bin", std::vector<std::uint8_t>{1, 2, 3});
+        expect(undecedent::save_map_file({sector}, {}, {}, {}, materials, path).ok,
+            "bad material texture compression setup should save");
+        std::string payload = chunk_payload(path, "MTEX", 2);
+        payload[8] = static_cast<char>(99);
+        replace_last_chunk_payload(path, "MTEX", 2, payload);
+        expect(!undecedent::load_map_file(path).ok, "invalid material texture compression codec should be rejected");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_bad_crc.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(materials, 2, "bad.bin", "bad.bin", std::vector<std::uint8_t>{1, 2, 3});
+        expect(undecedent::save_map_file({sector}, {}, {}, {}, materials, path).ok,
+            "bad material texture CRC setup should save");
+        std::string payload = chunk_payload(path, "MTEX", 2);
+        payload[32] = static_cast<char>(payload[32] ^ 0x7F);
+        replace_last_chunk_payload(path, "MTEX", 2, payload);
+        expect(!undecedent::load_map_file(path).ok, "material texture CRC mismatch should be rejected");
         std::filesystem::remove(path);
     }
 

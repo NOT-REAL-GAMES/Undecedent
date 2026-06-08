@@ -57,6 +57,22 @@ int main() {
         expect(geometry.uv_a.front().x == geometry.triangles.front().a.x &&
             geometry.uv_a.front().y == geometry.triangles.front().a.z,
             "floor UVs should match their vertex world X/Z coordinates");
+        bool found_ceiling_uv = false;
+        bool found_wall_uv = false;
+        for (std::size_t i = 0; i < geometry.surfaces.size(); ++i) {
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::Ceiling) {
+                expect(geometry.uv_a[i].x == geometry.triangles[i].a.x &&
+                    geometry.uv_a[i].y == -geometry.triangles[i].a.z,
+                    "ceiling UVs should flip world Z for image-space texture Y");
+                found_ceiling_uv = true;
+            }
+            if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::Wall &&
+                geometry.uv_b[i].y < geometry.uv_a[i].y) {
+                found_wall_uv = true;
+            }
+        }
+        expect(found_ceiling_uv, "single rectangle should emit ceiling UVs");
+        expect(found_wall_uv, "wall UVs should flip vertical height for image-space texture Y");
     }
 
     {
@@ -159,11 +175,11 @@ int main() {
         bool found_hole_wall_uv = false;
         for (std::size_t i = 0; i < geometry.surfaces.size(); ++i) {
             if (geometry.surfaces[i].kind == undecedent::RuntimeSurfaceKind::HoleWall &&
-                geometry.uv_b[i].y > geometry.uv_a[i].y) {
+                geometry.uv_b[i].y < geometry.uv_a[i].y) {
                 found_hole_wall_uv = true;
             }
         }
-        expect(found_hole_wall_uv, "hole-wall UVs should use vertical height");
+        expect(found_hole_wall_uv, "hole-wall UVs should flip vertical height for image-space texture Y");
     }
 
     return EXIT_SUCCESS;

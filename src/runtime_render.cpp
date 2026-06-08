@@ -1213,7 +1213,8 @@ int draw_deferred_runtime_world(
     renderer.last_screen_shadow_ms = 0.0;
     renderer.last_lighting_ms = 0.0;
     renderer.last_wire_overlay_ms = 0.0;
-    if (!ensure_deferred_renderer(renderer, width, height) ||
+    if (material_texture_array == 0 ||
+        !ensure_deferred_renderer(renderer, width, height) ||
         render_cache.vertex_buffer == 0 || render_cache.total_vertices <= 0) {
         return draw_runtime_world(
             world,

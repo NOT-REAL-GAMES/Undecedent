@@ -85,10 +85,14 @@ Vec3 runtime_triangle_area_normal(const RuntimeTriangle& triangle) {
     };
 }
 
+const MaterialSlot& normalized_slot(const MaterialLibrary& library, const int material_id) {
+    return library.slots[static_cast<std::size_t>(clamped_material_id(material_id))];
+}
+
 void append_runtime_vertex(
     std::vector<RuntimeRenderVertex>& vertices,
     const Vec3 point,
-    const MaterialSlot material,
+    const MaterialSlot& material,
     const Vec3 normal,
     const Vec2 uv,
     const int material_id
@@ -120,7 +124,7 @@ void append_runtime_triangle(
     const MaterialLibrary& material_library
 ) {
     const RuntimeTriangle& triangle = tagged_triangle.triangle;
-    const MaterialSlot material = material_slot(material_library, tagged_triangle.material_id);
+    const MaterialSlot& material = normalized_slot(material_library, tagged_triangle.material_id);
     const Vec3 face_normal = runtime_triangle_lighting_normal(triangle);
     const auto vertex_normal = [&](const Vec3 point) {
         if (!uses_smooth_normals(tagged_triangle)) {

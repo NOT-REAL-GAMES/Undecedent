@@ -1,6 +1,8 @@
 #include "undecedent/map_io.hpp"
 
 #include "undecedent/displacement.hpp"
+#include "undecedent/texture_compression.hpp"
+#include "undecedent/texture_image_codec.hpp"
 #include "undecedent/triangulator.hpp"
 
 #include <algorithm>
@@ -29,6 +31,7 @@ constexpr std::uint32_t kChunkFlagOptional = 1U << 0U;
 constexpr std::uint32_t kChunkHeaderSize = 32;
 constexpr std::uint32_t kChunkDirectoryEntrySize = 56;
 constexpr float kSparseDisplacementEpsilon = 0.001F;
+constexpr std::uint64_t kMaxEmbeddedTexturePayload = 256ULL * 1024ULL * 1024ULL;
 
 constexpr std::uint32_t fourcc(const char a, const char b, const char c, const char d) {
     return static_cast<std::uint32_t>(static_cast<unsigned char>(a)) |
@@ -42,6 +45,7 @@ constexpr std::uint32_t kChunkSector = fourcc('S', 'E', 'C', 'T');
 constexpr std::uint32_t kChunkEntities = fourcc('E', 'N', 'T', 'Y');
 constexpr std::uint32_t kChunkLighting = fourcc('L', 'I', 'T', 'E');
 constexpr std::uint32_t kChunkMaterials = fourcc('M', 'A', 'T', 'S');
+constexpr std::uint32_t kChunkMaterialTexture = fourcc('M', 'T', 'E', 'X');
 constexpr std::uint32_t kChunkEditorState = fourcc('E', 'D', 'S', 'T');
 constexpr std::uint32_t kChunkScripts = fourcc('S', 'C', 'R', 'P');
 
@@ -804,6 +808,18 @@ struct ChunkDirectoryEntry {
     std::uint32_t checksum = 0;
 };
 
+struct MaterialTexturePayload {
+    std::string name;
+    std::vector<std::uint8_t> bytes;
+    MaterialTextureImageCodec codec = MaterialTextureImageCodec::SdlSurfaceImage;
+};
+
+struct PreparedMaterialChunks {
+    MaterialLibrary library;
+    std::vector<ChunkRecord> texture_chunks;
+    std::vector<std::string> warnings;
+};
+
 std::string write_meta_payload(const std::uint64_t next_id) {
     std::ostringstream output;
     output << "meta 1\n";
@@ -855,7 +871,7 @@ std::string write_materials_payload(MaterialLibrary material_library) {
     material_library = normalized_material_library(std::move(material_library));
     std::ostringstream output;
     output << std::setprecision(std::numeric_limits<float>::max_digits10);
-    output << "materials 2\n";
+    output << "materials 3\n";
     output << "count " << kMaterialCount << '\n';
     for (int i = 0; i < kMaterialCount; ++i) {
         const MaterialSlot& slot = material_library.slots[static_cast<std::size_t>(i)];
@@ -868,9 +884,278 @@ std::string write_materials_payload(MaterialLibrary material_library) {
                << slot.metallic << ' '
                << slot.specular << ' '
                << slot.uv_scale << ' '
-               << std::quoted(slot.albedo_texture_path) << '\n';
+               << std::quoted(slot.albedo_texture_path) << ' '
+               << static_cast<std::uint32_t>(slot.albedo_texture_codec) << ' '
+               << static_cast<std::uint32_t>(slot.texture_storage_mode) << ' '
+               << slot.jxl_quality << '\n';
     }
     return output.str();
+}
+
+bool valid_material_texture_image_codec(const std::uint32_t codec) {
+    return codec == static_cast<std::uint32_t>(MaterialTextureImageCodec::SdlSurfaceImage) ||
+        codec == static_cast<std::uint32_t>(MaterialTextureImageCodec::JpegXl);
+}
+
+bool valid_material_texture_storage_mode(const std::uint32_t mode) {
+    return mode == static_cast<std::uint32_t>(MaterialTextureStorageMode::SourceBytes) ||
+        mode == static_cast<std::uint32_t>(MaterialTextureStorageMode::JpegXlLossless) ||
+        mode == static_cast<std::uint32_t>(MaterialTextureStorageMode::JpegXlLossy);
+}
+
+bool valid_texture_payload_compression(const std::uint32_t codec) {
+    return codec == static_cast<std::uint32_t>(TexturePayloadCompression::None) ||
+        codec == static_cast<std::uint32_t>(TexturePayloadCompression::XzLzma2);
+}
+
+void choose_material_texture_storage(
+    const MaterialSlot& slot,
+    std::vector<std::uint8_t>& candidate_bytes,
+    MaterialTextureImageCodec& candidate_codec,
+    std::vector<std::string>& warnings
+) {
+    candidate_bytes = slot.albedo_texture_bytes;
+    candidate_codec = slot.albedo_texture_codec;
+    if (slot.texture_storage_mode == MaterialTextureStorageMode::SourceBytes) {
+        return;
+    }
+
+    DecodedTextureImage image;
+    std::string message;
+    const std::string label = slot.albedo_texture_name.empty()
+        ? slot.albedo_texture_path
+        : slot.albedo_texture_name;
+    if (!decode_texture_image_bytes(slot.albedo_texture_codec, slot.albedo_texture_bytes, label, image, message)) {
+        warnings.push_back("Could not decode material texture for JPEG XL save: " + message);
+        return;
+    }
+
+    std::vector<std::uint8_t> jxl_bytes;
+    const bool lossless = slot.texture_storage_mode == MaterialTextureStorageMode::JpegXlLossless;
+    if (!encode_jpeg_xl_rgba(image, lossless, slot.jxl_quality, jxl_bytes, message)) {
+        warnings.push_back("Could not encode material texture as JPEG XL: " + message);
+        return;
+    }
+    candidate_bytes = std::move(jxl_bytes);
+    candidate_codec = MaterialTextureImageCodec::JpegXl;
+}
+
+std::vector<std::uint8_t> write_material_texture_payload(
+    const MaterialSlot& slot,
+    std::vector<std::string>& warnings
+) {
+    std::vector<std::uint8_t> candidate_bytes;
+    MaterialTextureImageCodec candidate_codec = MaterialTextureImageCodec::SdlSurfaceImage;
+    choose_material_texture_storage(slot, candidate_bytes, candidate_codec, warnings);
+
+    std::vector<std::uint8_t> stored_bytes = candidate_bytes;
+    TexturePayloadCompression compression = TexturePayloadCompression::None;
+    std::vector<std::uint8_t> compressed_bytes;
+    std::string message;
+    if (compress_lzma2_xz(candidate_bytes, compressed_bytes, message) &&
+        compressed_bytes.size() < candidate_bytes.size()) {
+        stored_bytes = std::move(compressed_bytes);
+        compression = TexturePayloadCompression::XzLzma2;
+    }
+
+    std::vector<std::uint8_t> payload;
+    append_u32(payload, 2);
+    append_u32(payload, static_cast<std::uint32_t>(candidate_codec));
+    append_u32(payload, static_cast<std::uint32_t>(compression));
+    append_u32(payload, static_cast<std::uint32_t>(slot.albedo_texture_name.size()));
+    append_u64(payload, static_cast<std::uint64_t>(candidate_bytes.size()));
+    append_u64(payload, static_cast<std::uint64_t>(stored_bytes.size()));
+    append_u32(payload, crc32_bytes(candidate_bytes));
+    payload.insert(payload.end(), slot.albedo_texture_name.begin(), slot.albedo_texture_name.end());
+    payload.insert(payload.end(), stored_bytes.begin(), stored_bytes.end());
+    return payload;
+}
+
+bool read_material_texture_payload(
+    const std::vector<std::uint8_t>& payload,
+    MaterialTexturePayload& texture,
+    std::string& message
+) {
+    std::size_t offset = 0;
+    std::uint32_t version = 0;
+    if (!read_u32(payload, offset, version)) {
+        message = "Material texture chunk is truncated.";
+        return false;
+    }
+
+    if (version == 1) {
+        std::uint32_t name_length = 0;
+        std::uint64_t byte_count = 0;
+        if (!read_u32(payload, offset, name_length) ||
+            !read_u64(payload, offset, byte_count)) {
+            message = "Material texture chunk is truncated.";
+            return false;
+        }
+        if (byte_count == 0 || byte_count > kMaxEmbeddedTexturePayload) {
+            message = "Material texture chunk size is invalid.";
+            return false;
+        }
+        if (static_cast<std::uint64_t>(payload.size() - offset) !=
+            static_cast<std::uint64_t>(name_length) + byte_count) {
+            message = "Material texture chunk size is invalid.";
+            return false;
+        }
+
+        texture.name.assign(
+            payload.begin() + static_cast<std::ptrdiff_t>(offset),
+            payload.begin() + static_cast<std::ptrdiff_t>(offset + name_length)
+        );
+        offset += name_length;
+        texture.bytes.assign(
+            payload.begin() + static_cast<std::ptrdiff_t>(offset),
+            payload.end()
+        );
+        texture.codec = MaterialTextureImageCodec::SdlSurfaceImage;
+        return true;
+    }
+
+    if (version != 2) {
+        message = "Unsupported material texture chunk version.";
+        return false;
+    }
+
+    std::uint32_t image_codec = 0;
+    std::uint32_t compression_codec = 0;
+    std::uint32_t name_length = 0;
+    std::uint64_t uncompressed_size = 0;
+    std::uint64_t stored_size = 0;
+    std::uint32_t raw_crc32 = 0;
+    if (!read_u32(payload, offset, image_codec) ||
+        !read_u32(payload, offset, compression_codec) ||
+        !read_u32(payload, offset, name_length) ||
+        !read_u64(payload, offset, uncompressed_size) ||
+        !read_u64(payload, offset, stored_size) ||
+        !read_u32(payload, offset, raw_crc32)) {
+        message = "Material texture chunk is truncated.";
+        return false;
+    }
+    if (!valid_material_texture_image_codec(image_codec)) {
+        message = "Material texture image codec is unsupported.";
+        return false;
+    }
+    if (!valid_texture_payload_compression(compression_codec)) {
+        message = "Material texture compression codec is unsupported.";
+        return false;
+    }
+    if (uncompressed_size == 0 || uncompressed_size > kMaxEmbeddedTexturePayload ||
+        stored_size == 0 || stored_size > kMaxEmbeddedTexturePayload) {
+        message = "Material texture chunk size is invalid.";
+        return false;
+    }
+    if (static_cast<std::uint64_t>(payload.size() - offset) !=
+        static_cast<std::uint64_t>(name_length) + stored_size) {
+        message = "Material texture chunk size is invalid.";
+        return false;
+    }
+
+    texture.name.assign(
+        payload.begin() + static_cast<std::ptrdiff_t>(offset),
+        payload.begin() + static_cast<std::ptrdiff_t>(offset + name_length)
+    );
+    offset += name_length;
+    std::vector<std::uint8_t> stored_bytes(
+        payload.begin() + static_cast<std::ptrdiff_t>(offset),
+        payload.end()
+    );
+
+    if (compression_codec == static_cast<std::uint32_t>(TexturePayloadCompression::None)) {
+        if (stored_size != uncompressed_size) {
+            message = "Material texture raw size is invalid.";
+            return false;
+        }
+        texture.bytes = std::move(stored_bytes);
+    } else if (!decompress_lzma2_xz(stored_bytes, uncompressed_size, texture.bytes, message)) {
+        return false;
+    }
+    if (crc32_bytes(texture.bytes) != raw_crc32) {
+        message = "Material texture chunk CRC mismatch.";
+        return false;
+    }
+    texture.codec = static_cast<MaterialTextureImageCodec>(image_codec);
+    return true;
+}
+
+bool read_texture_source_file(
+    const std::filesystem::path& path,
+    std::vector<std::uint8_t>& bytes,
+    std::string& message
+) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        message = "Could not open material texture for embedding: " + path.string();
+        return false;
+    }
+    bytes.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    if (bytes.empty()) {
+        message = "Material texture file is empty: " + path.string();
+        return false;
+    }
+    return true;
+}
+
+std::filesystem::path resolved_material_texture_path(
+    const std::filesystem::path& map_path,
+    const std::filesystem::path& texture_path
+) {
+    if (texture_path.is_absolute()) {
+        return texture_path;
+    }
+
+    const std::filesystem::path map_relative = map_path.parent_path() / texture_path;
+    std::error_code error;
+    if (std::filesystem::exists(map_relative, error)) {
+        return map_relative;
+    }
+    return std::filesystem::current_path() / texture_path;
+}
+
+PreparedMaterialChunks prepare_material_chunks_for_save(
+    MaterialLibrary material_library,
+    const std::filesystem::path& map_path
+) {
+    PreparedMaterialChunks prepared;
+    prepared.library = normalized_material_library(std::move(material_library));
+
+    for (int i = 0; i < kMaterialCount; ++i) {
+        MaterialSlot& slot = prepared.library.slots[static_cast<std::size_t>(i)];
+        if (slot.albedo_texture_bytes.empty() && !slot.albedo_texture_path.empty()) {
+            std::vector<std::uint8_t> bytes;
+            std::string message;
+            const std::filesystem::path texture_path =
+                resolved_material_texture_path(map_path, slot.albedo_texture_path);
+            if (read_texture_source_file(texture_path, bytes, message)) {
+                slot.albedo_texture_bytes = std::move(bytes);
+                slot.albedo_texture_codec = material_texture_codec_for_path(texture_path);
+                if (slot.albedo_texture_name.empty()) {
+                    slot.albedo_texture_name = texture_path.filename().generic_string();
+                }
+            } else {
+                prepared.warnings.push_back(message);
+            }
+        }
+
+        if (!slot.albedo_texture_bytes.empty()) {
+            if (slot.albedo_texture_name.empty()) {
+                const std::filesystem::path texture_path = slot.albedo_texture_path;
+                slot.albedo_texture_name = texture_path.filename().empty()
+                    ? "material_" + std::to_string(i)
+                    : texture_path.filename().generic_string();
+            }
+            prepared.texture_chunks.push_back(ChunkRecord{
+                kChunkMaterialTexture,
+                kChunkFlagOptional,
+                static_cast<std::uint64_t>(i),
+                write_material_texture_payload(slot, prepared.warnings)
+            });
+        }
+    }
+
+    return prepared;
 }
 
 std::string write_lighting_payload(const WorldLighting world_lighting) {
@@ -1073,7 +1358,7 @@ bool read_materials_payload(std::istream& input, MaterialLibrary& material_libra
         return false;
     }
     int version = 0;
-    if (!(input >> version) || (version != 1 && version != 2)) {
+    if (!(input >> version) || (version != 1 && version != 2 && version != 3)) {
         message = "Unsupported materials chunk version.";
         return false;
     }
@@ -1112,6 +1397,22 @@ bool read_materials_payload(std::istream& input, MaterialLibrary& material_libra
             message = "Malformed material slot.";
             return false;
         }
+        if (version >= 3) {
+            std::uint32_t image_codec = 0;
+            std::uint32_t storage_mode = 0;
+            if (!(input >> image_codec >> storage_mode >> slot.jxl_quality) ||
+                !valid_material_texture_image_codec(image_codec) ||
+                !valid_material_texture_storage_mode(storage_mode)) {
+                message = "Malformed material texture storage fields.";
+                return false;
+            }
+            slot.albedo_texture_codec = static_cast<MaterialTextureImageCodec>(image_codec);
+            slot.texture_storage_mode = static_cast<MaterialTextureStorageMode>(storage_mode);
+        } else {
+            slot.albedo_texture_codec = material_texture_codec_for_path(slot.albedo_texture_path);
+            slot.texture_storage_mode = MaterialTextureStorageMode::SourceBytes;
+            slot.jxl_quality = 80;
+        }
         if (index < 0 || index >= kMaterialCount || seen[static_cast<std::size_t>(index)]) {
             message = "Material slot index is invalid or duplicated.";
             return false;
@@ -1140,12 +1441,17 @@ std::vector<ChunkRecord> build_chunk_records(
     std::vector<PointLight> point_lights,
     const WorldLighting world_lighting,
     const MaterialLibrary& material_library,
-    const ScriptStore& scripts
+    const ScriptStore& scripts,
+    const std::filesystem::path& path,
+    std::vector<std::string>& warnings
 ) {
     const std::uint64_t next_id = assign_missing_stable_ids(sectors, player_spawn, point_lights);
+    PreparedMaterialChunks material_chunks = prepare_material_chunks_for_save(material_library, path);
+    warnings.insert(warnings.end(), material_chunks.warnings.begin(), material_chunks.warnings.end());
+
     std::vector<ChunkRecord> chunks;
     chunks.push_back(ChunkRecord{kChunkMeta, 0, 0, string_payload(write_meta_payload(next_id))});
-    chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload(material_library))});
+    chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload(material_chunks.library))});
     chunks.push_back(ChunkRecord{kChunkLighting, kChunkFlagOptional, 0, string_payload(write_lighting_payload(world_lighting))});
     chunks.push_back(ChunkRecord{kChunkEntities, 0, 0, string_payload(write_entities_payload(player_spawn, point_lights))});
     if (!script_store_empty(scripts)) {
@@ -1154,6 +1460,11 @@ std::vector<ChunkRecord> build_chunk_records(
     for (const SectorPlane& sector : sectors) {
         chunks.push_back(ChunkRecord{kChunkSector, 0, sector.id, string_payload(write_sector_payload(sector))});
     }
+    chunks.insert(
+        chunks.end(),
+        std::make_move_iterator(material_chunks.texture_chunks.begin()),
+        std::make_move_iterator(material_chunks.texture_chunks.end())
+    );
     return chunks;
 }
 
@@ -1340,6 +1651,8 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
     std::vector<PointLight> point_lights;
     WorldLighting world_lighting;
     MaterialLibrary material_library = default_material_library();
+    std::array<MaterialTexturePayload, kMaterialCount> material_textures{};
+    std::array<bool, kMaterialCount> material_texture_seen{};
     ScriptStore scripts;
     std::vector<SectorPlane> sectors;
     std::set<std::uint64_t> sector_ids;
@@ -1359,6 +1672,23 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
             if (!read_materials_payload(input, material_library, message)) {
                 return load_error(message);
             }
+            continue;
+        }
+        if (entry.type == kChunkMaterialTexture) {
+            if ((entry.flags & kChunkFlagOptional) == 0U) {
+                return load_error("Material texture chunk must be optional.");
+            }
+            if (entry.id >= static_cast<std::uint64_t>(kMaterialCount)) {
+                return load_error("Material texture chunk id is out of range.");
+            }
+            const auto material_id = static_cast<std::size_t>(entry.id);
+            if (material_texture_seen[material_id]) {
+                return load_error("Duplicate material texture chunk.");
+            }
+            if (!read_material_texture_payload(payload, material_textures[material_id], message)) {
+                return load_error(message);
+            }
+            material_texture_seen[material_id] = true;
             continue;
         }
         if (entry.type == kChunkLighting && (entry.flags & kChunkFlagOptional) != 0U) {
@@ -1423,6 +1753,17 @@ LoadMapResult load_chunked_map_file(const std::filesystem::path& path, const std
     }
     if (!validate_sector_script_ids(scripts, sector_ids, message)) {
         return load_error(message);
+    }
+
+    for (int i = 0; i < kMaterialCount; ++i) {
+        const auto index = static_cast<std::size_t>(i);
+        if (!material_texture_seen[index]) {
+            continue;
+        }
+        MaterialSlot& slot = material_library.slots[index];
+        slot.albedo_texture_name = std::move(material_textures[index].name);
+        slot.albedo_texture_bytes = std::move(material_textures[index].bytes);
+        slot.albedo_texture_codec = material_textures[index].codec;
     }
 
     LoadMapResult result =
@@ -1505,14 +1846,18 @@ SaveMapResult save_map_file(
     const std::filesystem::path& path
 ) {
     std::string error_message;
+    std::vector<std::string> warnings;
     std::vector<ChunkRecord> chunks =
-        build_chunk_records(sectors, player_spawn, point_lights, world_lighting, material_library, scripts);
+        build_chunk_records(sectors, player_spawn, point_lights, world_lighting, material_library, scripts, path, warnings);
     if (!write_chunk_file(path, std::move(chunks), error_message)) {
         return save_error(error_message);
     }
 
     std::ostringstream message;
     message << "Saved chunked map with " << sectors.size() << " sectors to " << path.string();
+    for (const std::string& warning : warnings) {
+        message << "\nWarning: " << warning;
+    }
     return SaveMapResult{true, message.str()};
 }
 
@@ -1616,15 +1961,15 @@ SaveMapResult save_map_file_dirty(
         return true;
     };
 
+    std::vector<std::string> warnings;
+    PreparedMaterialChunks material_chunks = prepare_material_chunks_for_save(material_library, path);
+    warnings.insert(warnings.end(), material_chunks.warnings.begin(), material_chunks.warnings.end());
+
     std::vector<ChunkRecord> chunks;
     chunks.push_back(ChunkRecord{kChunkMeta, 0, 0, string_payload(write_meta_payload(next_id))});
 
     ChunkRecord reused;
-    if (!dirty_state.materials && existing_chunk(kChunkMaterials, 0, reused)) {
-        chunks.push_back(std::move(reused));
-    } else {
-        chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload(material_library))});
-    }
+    chunks.push_back(ChunkRecord{kChunkMaterials, kChunkFlagOptional, 0, string_payload(write_materials_payload(material_chunks.library))});
 
     if (!dirty_state.metadata && existing_chunk(kChunkLighting, 0, reused)) {
         chunks.push_back(std::move(reused));
@@ -1654,6 +1999,12 @@ SaveMapResult save_map_file_dirty(
         }
     }
 
+    chunks.insert(
+        chunks.end(),
+        std::make_move_iterator(material_chunks.texture_chunks.begin()),
+        std::make_move_iterator(material_chunks.texture_chunks.end())
+    );
+
     std::string write_message;
     if (!write_chunk_file(path, std::move(chunks), write_message)) {
         return save_error(write_message);
@@ -1661,6 +2012,9 @@ SaveMapResult save_map_file_dirty(
 
     std::ostringstream message;
     message << "Saved dirty chunked map with " << sectors_with_ids.size() << " sectors to " << path.string();
+    for (const std::string& warning : warnings) {
+        message << "\nWarning: " << warning;
+    }
     return SaveMapResult{true, message.str()};
 }
 

@@ -41,6 +41,18 @@ Vec2 lerp(const Vec2 a, const Vec2 b, const float t) {
     return Vec2{lerp(a.x, b.x, t), lerp(a.y, b.y, t)};
 }
 
+Vec2 floor_uv(const Vec2 point) {
+    return point;
+}
+
+Vec2 ceiling_uv(const Vec2 point) {
+    return Vec2{point.x, -point.y};
+}
+
+float wall_v(const float height) {
+    return -height;
+}
+
 int surface_segment_count(const SectorPlane& sector) {
     int count = 1;
     if (sector.floor_displacement.enabled) {
@@ -367,9 +379,9 @@ void add_wall_span(
         world,
         sector_id,
         RuntimeTriangle{bottom_va, top_va, top_vb},
-        Vec2{u_a, bottom_a},
-        Vec2{u_a, top_a},
-        Vec2{u_b, top_b},
+        Vec2{u_a, wall_v(bottom_a)},
+        Vec2{u_a, wall_v(top_a)},
+        Vec2{u_b, wall_v(top_b)},
         material_id,
         surface
     );
@@ -377,9 +389,9 @@ void add_wall_span(
         world,
         sector_id,
         RuntimeTriangle{bottom_va, top_vb, bottom_vb},
-        Vec2{u_a, bottom_a},
-        Vec2{u_b, top_b},
-        Vec2{u_b, bottom_b},
+        Vec2{u_a, wall_v(bottom_a)},
+        Vec2{u_b, wall_v(top_b)},
+        Vec2{u_b, wall_v(bottom_b)},
         material_id,
         surface
     );
@@ -632,9 +644,9 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
                     floor_vertex(triangle.b.position, triangle.b.height),
                     floor_vertex(triangle.c.position, triangle.c.height),
                 },
-                triangle.a.position,
-                triangle.b.position,
-                triangle.c.position,
+                floor_uv(triangle.a.position),
+                floor_uv(triangle.b.position),
+                floor_uv(triangle.c.position),
                 source.floor_material,
                 RuntimeSurfaceRef{RuntimeSurfaceKind::Floor, -1, -1}
             );
@@ -648,9 +660,9 @@ RuntimeWorld build_runtime_world(const std::vector<SectorPlane>& sectors, const 
                     floor_vertex(triangle.b.position, triangle.b.height),
                     floor_vertex(triangle.a.position, triangle.a.height),
                 },
-                triangle.c.position,
-                triangle.b.position,
-                triangle.a.position,
+                ceiling_uv(triangle.c.position),
+                ceiling_uv(triangle.b.position),
+                ceiling_uv(triangle.a.position),
                 source.ceiling_material,
                 RuntimeSurfaceRef{RuntimeSurfaceKind::Ceiling, -1, -1}
             );

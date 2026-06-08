@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.20)
 
 project(Undecedent VERSION 0.0.0 LANGUAGES C CXX)
 
@@ -7,8 +7,13 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
-include(FetchContent)
+if(MSVC)
+    add_compile_options(/FS)
+    string(APPEND CMAKE_C_FLAGS_DEBUG " /FS /Z7")
+    string(APPEND CMAKE_CXX_FLAGS_DEBUG " /FS /Z7")
+endif()
 
+include(FetchContent)
 
 FetchContent_Declare(
     SDL3 STATIC
@@ -16,9 +21,51 @@ FetchContent_Declare(
     GIT_TAG "main"
 )
 
-FetchContent_MakeAvailable(SDL3)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(XZ_NLS OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_XZ OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_XZDEC OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_LZMADEC OFF CACHE BOOL "" FORCE)
+set(XZ_TOOL_LZMAINFO OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    xz
+    GIT_REPOSITORY "https://github.com/tukaani-project/xz.git"
+    GIT_TAG "v5.8.3"
+)
+
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_MANPAGES OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_BENCHMARK OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_JNI OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_SJPEG OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_OPENEXR OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_TRANSCODE_JPEG OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_PLUGINS OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_VIEWERS OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_DOXYGEN OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_JPEGLI OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_JPEGLI_LIBJPEG OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    libjxl
+    GIT_REPOSITORY "https://github.com/libjxl/libjxl.git"
+    GIT_TAG "v0.11.2"
+    GIT_SUBMODULES_RECURSE TRUE
+)
+
+FetchContent_MakeAvailable(SDL3 xz libjxl)
 
 find_package(OpenGL REQUIRED)
+
+add_library(UndecedentTextureCodecs STATIC
+    src/texture_compression.cpp
+    src/texture_image_codec.cpp
+)
+
+target_include_directories(UndecedentTextureCodecs PUBLIC include "${xz_SOURCE_DIR}/src/liblzma/api")
+target_link_libraries(UndecedentTextureCodecs PUBLIC SDL3::SDL3 liblzma jxl)
+target_link_libraries(UndecedentTextureCodecs PUBLIC $<$<TARGET_EXISTS:jxl_threads>:jxl_threads>)
 
 add_executable(Undecedent
     main.cpp
@@ -56,7 +103,7 @@ add_executable(Undecedent
 )
 
 target_include_directories(Undecedent PRIVATE include glad/include)
-target_link_libraries(Undecedent PUBLIC OpenGL::GL SDL3::SDL3)
+target_link_libraries(Undecedent PUBLIC OpenGL::GL SDL3::SDL3 UndecedentTextureCodecs)
 
 if(WIN32)
     add_custom_command(TARGET Undecedent POST_BUILD
@@ -139,6 +186,7 @@ add_executable(UndecedentMapIoTests
 )
 
 target_include_directories(UndecedentMapIoTests PRIVATE include)
+target_link_libraries(UndecedentMapIoTests PRIVATE UndecedentTextureCodecs)
 
 add_executable(UndecedentScriptTests
     tests/script_tests.cpp
@@ -184,6 +232,13 @@ add_executable(UndecedentMaterialsTests
 )
 
 target_include_directories(UndecedentMaterialsTests PRIVATE include)
+
+add_executable(UndecedentTextureCodecTests
+    tests/texture_codec_tests.cpp
+)
+
+target_include_directories(UndecedentTextureCodecTests PRIVATE include)
+target_link_libraries(UndecedentTextureCodecTests PRIVATE UndecedentTextureCodecs)
 
 add_executable(UndecedentSdfTextTests
     tests/sdf_text_tests.cpp

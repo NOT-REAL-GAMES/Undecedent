@@ -3,6 +3,8 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
+#include <vector>
 
 using namespace undecedent;
 
@@ -57,8 +59,23 @@ void test_material_library_defaults_and_texture_paths() {
 
     set_material_texture_path(library, 3, "textures/brick.png");
     assert(material_slot(library, 3).albedo_texture_path == "textures/brick.png");
+    assert(material_slot(library, 3).albedo_texture_bytes.empty());
+
+    set_material_texture(
+        library,
+        3,
+        "textures/brick.png",
+        "brick.png",
+        std::vector<std::uint8_t>{1, 2, 3, 4}
+    );
+    assert(material_slot(library, 3).albedo_texture_path == "textures/brick.png");
+    assert(material_slot(library, 3).albedo_texture_name == "brick.png");
+    assert(material_slot(library, 3).albedo_texture_bytes == std::vector<std::uint8_t>({1, 2, 3, 4}));
+
     clear_material_texture_path(library, 3);
     assert(material_slot(library, 3).albedo_texture_path.empty());
+    assert(material_slot(library, 3).albedo_texture_name.empty());
+    assert(material_slot(library, 3).albedo_texture_bytes.empty());
 }
 
 void test_material_library_normalization() {
