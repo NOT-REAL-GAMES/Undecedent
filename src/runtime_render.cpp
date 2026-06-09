@@ -37,6 +37,7 @@ struct ForwardRuntimeProgram {
     GLuint vao = 0;
     GLint mvp = -1;
     GLint material_albedo = -1;
+    GLuint configured_vertex_buffer = 0;
     bool failed = false;
 };
 
@@ -116,12 +117,9 @@ in vec2 vTexCoord;
 flat in int vMaterialSlot;
 uniform sampler2DArray uMaterialAlbedo;
 layout(location = 0) out vec4 oColor;
-vec3 linear_to_display(vec3 color) {
-    return pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2));
-}
 void main() {
     vec3 texel = texture(uMaterialAlbedo, vec3(vTexCoord, float(vMaterialSlot))).rgb;
-    oColor = vec4(linear_to_display(vColor * texel), 1.0);
+    oColor = vec4(clamp(vColor * texel, vec3(0.0), vec3(1.0)), 1.0);
 }
 )";
 
@@ -163,6 +161,85 @@ void main() {
     renderer.material_albedo = glGetUniformLocation(renderer.program, "uMaterialAlbedo");
     renderer.failed = renderer.vao == 0;
     return !renderer.failed;
+}
+
+bool begin_unlit_runtime_draw(
+    const RuntimeRenderCache& render_cache,
+    const Mat4& view_projection,
+    const MaterialTextureArray* material_textures
+) {
+    const GLuint material_texture_array = material_textures == nullptr
+        ? 0
+        : material_texture_array_id(*material_textures, MaterialTextureChannel::Albedo);
+    if (render_cache.vertex_buffer == 0 ||
+        render_cache.total_vertices <= 0 ||
+        material_texture_array == 0 ||
+        !ensure_forward_runtime_program()) {
+        return false;
+    }
+
+    ForwardRuntimeProgram& renderer = forward_runtime_program();
+    glUseProgram(renderer.program);
+    glUniformMatrix4fv(renderer.mvp, 1, GL_FALSE, view_projection.m.data());
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array);
+    glUniform1i(renderer.material_albedo, 0);
+    glBindVertexArray(renderer.vao);
+
+    if (renderer.configured_vertex_buffer != render_cache.vertex_buffer) {
+        glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glEnableVertexAttribArray(2);
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(
+            0,
+            3,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(RuntimeRenderVertex),
+            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, x))
+        );
+        glVertexAttribPointer(
+            1,
+            3,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(RuntimeRenderVertex),
+            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, r))
+        );
+        glVertexAttribPointer(
+            2,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(RuntimeRenderVertex),
+            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, u))
+        );
+        glVertexAttribPointer(
+            3,
+            1,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(RuntimeRenderVertex),
+            reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, material_slot))
+        );
+        renderer.configured_vertex_buffer = render_cache.vertex_buffer;
+    }
+
+    return true;
+}
+
+void end_unlit_runtime_draw() {
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    glUseProgram(0);
+}
+
+void draw_unlit_runtime_range(const GLint first_vertex, const GLsizei vertex_count) {
+    if (vertex_count > 0) {
+        glDrawArrays(GL_TRIANGLES, first_vertex, vertex_count);
+    }
 }
 
 std::array<std::array<float, 16>, kSunShadowCascadeCount> sun_cascade_matrices(
@@ -383,10 +460,7 @@ void draw_textured_runtime_arrays(
     const GLint first_vertex,
     const GLsizei vertex_count
 ) {
-    const GLuint material_texture_array = material_textures == nullptr
-        ? 0
-        : material_texture_array_id(*material_textures, MaterialTextureChannel::Albedo);
-    if (material_texture_array == 0 || !ensure_forward_runtime_program()) {
+    if (!begin_unlit_runtime_draw(render_cache, view_projection, material_textures)) {
         core_draw_colored_arrays(
             GL_TRIANGLES,
             render_cache.vertex_buffer,
@@ -400,59 +474,8 @@ void draw_textured_runtime_arrays(
         return;
     }
 
-    ForwardRuntimeProgram& renderer = forward_runtime_program();
-    glUseProgram(renderer.program);
-    glUniformMatrix4fv(renderer.mvp, 1, GL_FALSE, view_projection.m.data());
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, material_texture_array);
-    glUniform1i(renderer.material_albedo, 0);
-    glBindVertexArray(renderer.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, render_cache.vertex_buffer);
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glEnableVertexAttribArray(2);
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(
-        0,
-        3,
-        GL_FLOAT,
-        GL_FALSE,
-        sizeof(RuntimeRenderVertex),
-        reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, x))
-    );
-    glVertexAttribPointer(
-        1,
-        3,
-        GL_FLOAT,
-        GL_FALSE,
-        sizeof(RuntimeRenderVertex),
-        reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, r))
-    );
-    glVertexAttribPointer(
-        2,
-        2,
-        GL_FLOAT,
-        GL_FALSE,
-        sizeof(RuntimeRenderVertex),
-        reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, u))
-    );
-    glVertexAttribPointer(
-        3,
-        1,
-        GL_FLOAT,
-        GL_FALSE,
-        sizeof(RuntimeRenderVertex),
-        reinterpret_cast<const void*>(offsetof(RuntimeRenderVertex, material_slot))
-    );
-    glDrawArrays(GL_TRIANGLES, first_vertex, vertex_count);
-    glDisableVertexAttribArray(3);
-    glDisableVertexAttribArray(2);
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-    glUseProgram(0);
+    draw_unlit_runtime_range(first_vertex, vertex_count);
+    end_unlit_runtime_draw();
 }
 
 std::array<Mat4, 6> point_shadow_matrices(const PointLight& light) {
@@ -1148,14 +1171,22 @@ int draw_runtime_world(
     const Mat4 view_projection = game_view_projection_matrix(width, height, camera, config);
 
     if (render_cache.vertex_buffer != 0 && render_cache.total_vertices > 0) {
+        const bool unlit_runtime_bound = begin_unlit_runtime_draw(render_cache, view_projection, material_textures);
         if (!filter_visible_sectors) {
-            draw_textured_runtime_arrays(
-                render_cache,
-                view_projection,
-                material_textures,
-                0,
-                render_cache.total_vertices
-            );
+            if (unlit_runtime_bound) {
+                draw_unlit_runtime_range(0, render_cache.total_vertices);
+            } else {
+                core_draw_colored_arrays(
+                    GL_TRIANGLES,
+                    render_cache.vertex_buffer,
+                    0,
+                    render_cache.total_vertices,
+                    sizeof(RuntimeRenderVertex),
+                    offsetof(RuntimeRenderVertex, x),
+                    offsetof(RuntimeRenderVertex, r),
+                    3
+                );
+            }
             visible_triangle_count = render_cache.total_vertices / 3;
         } else {
             for (const int sector_id : visible_sectors) {
@@ -1166,15 +1197,25 @@ int draw_runtime_world(
                 if (range.vertex_count <= 0) {
                     continue;
                 }
-                draw_textured_runtime_arrays(
-                    render_cache,
-                    view_projection,
-                    material_textures,
-                    range.first_vertex,
-                    range.vertex_count
-                );
+                if (unlit_runtime_bound) {
+                    draw_unlit_runtime_range(range.first_vertex, range.vertex_count);
+                } else {
+                    core_draw_colored_arrays(
+                        GL_TRIANGLES,
+                        render_cache.vertex_buffer,
+                        range.first_vertex,
+                        range.vertex_count,
+                        sizeof(RuntimeRenderVertex),
+                        offsetof(RuntimeRenderVertex, x),
+                        offsetof(RuntimeRenderVertex, r),
+                        3
+                    );
+                }
                 visible_triangle_count += range.vertex_count / 3;
             }
+        }
+        if (unlit_runtime_bound) {
+            end_unlit_runtime_draw();
         }
     }
 

@@ -76,16 +76,29 @@ const MaterialLibrary& default_material_library() {
 }
 
 MaterialColor material_color(const MaterialLibrary& library, const int material_id) {
-    return material_slot(library, material_id).base_color;
+    const int clamped = clamped_material_id(material_id);
+    const MaterialSlot& slot = library.slots[static_cast<std::size_t>(clamped)];
+    const MaterialSlot& fallback = default_material_library().slots[static_cast<std::size_t>(clamped)];
+    return MaterialColor{
+        clamp_unit(slot.base_color.r, fallback.base_color.r),
+        clamp_unit(slot.base_color.g, fallback.base_color.g),
+        clamp_unit(slot.base_color.b, fallback.base_color.b),
+    };
 }
 
 MaterialProperties material_properties(const MaterialLibrary& library, const int material_id) {
-    const MaterialSlot slot = material_slot(library, material_id);
+    const int clamped = clamped_material_id(material_id);
+    const MaterialSlot& slot = library.slots[static_cast<std::size_t>(clamped)];
+    const MaterialSlot& fallback = default_material_library().slots[static_cast<std::size_t>(clamped)];
     return MaterialProperties{
-        slot.base_color,
-        slot.roughness,
-        slot.metallic,
-        slot.specular,
+        MaterialColor{
+            clamp_unit(slot.base_color.r, fallback.base_color.r),
+            clamp_unit(slot.base_color.g, fallback.base_color.g),
+            clamp_unit(slot.base_color.b, fallback.base_color.b),
+        },
+        clamp_roughness(slot.roughness, fallback.roughness),
+        clamp_unit(slot.metallic, fallback.metallic),
+        clamp_unit(slot.specular, fallback.specular),
     };
 }
 

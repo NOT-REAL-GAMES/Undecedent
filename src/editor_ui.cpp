@@ -255,7 +255,7 @@ void draw_material_selector(
 
     core_begin(kCoreQuads);
     for (int i = 0; i < kMaterialCount; ++i) {
-        const MaterialSlot slot = material_slot(material_library, i);
+        const MaterialSlot& slot = material_library.slots[static_cast<std::size_t>(i)];
         const float sx = x + (static_cast<float>(i) * (swatch + gap));
         for (int channel_index = 0; channel_index < kMaterialTextureChannelCount; ++channel_index) {
             const auto channel = static_cast<MaterialTextureChannel>(channel_index);

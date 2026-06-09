@@ -3,6 +3,7 @@
 #include "undecedent/displacement.hpp"
 #include "undecedent/texture_image_codec.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstdint>
 #include <cmath>
@@ -44,16 +45,21 @@ void write_bytes(const std::filesystem::path& path, const std::vector<std::uint8
     output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 }
 
-std::vector<std::uint8_t> generated_jxl_bytes() {
+std::vector<std::uint8_t> generated_jxl_bytes(const int width = 2, const int height = 2) {
     undecedent::DecodedTextureImage image;
-    image.width = 2;
-    image.height = 2;
-    image.rgba = {
-        255, 0, 0, 255,
-        0, 255, 0, 255,
-        0, 0, 255, 255,
-        255, 255, 0, 255,
-    };
+    image.width = width;
+    image.height = height;
+    image.rgba.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t offset =
+                ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)) * 4;
+            image.rgba[offset + 0] = static_cast<std::uint8_t>((x * 255) / std::max(1, width - 1));
+            image.rgba[offset + 1] = static_cast<std::uint8_t>((y * 255) / std::max(1, height - 1));
+            image.rgba[offset + 2] = static_cast<std::uint8_t>((x + y) & 0xFF);
+            image.rgba[offset + 3] = 255;
+        }
+    }
     std::vector<std::uint8_t> bytes;
     std::string message;
     expect(
@@ -971,6 +977,45 @@ int main() {
             "JXL material texture bytes should decode after load"
         );
         expect(decoded.width == 2 && decoded.height == 2, "JXL material texture dimensions should round-trip");
+        std::filesystem::remove(path);
+    }
+
+    {
+        const std::filesystem::path path = test_path("undecedent_map_io_material_texture_cap.udmap");
+        SectorPlane sector;
+        sector.outer = loop({{0, 0}, {32, 0}, {32, 32}, {0, 32}});
+        undecedent::MaterialLibrary materials = undecedent::default_material_library();
+        undecedent::set_material_texture(
+            materials,
+            6,
+            "textures/huge_strip.jxl",
+            "huge_strip.jxl",
+            generated_jxl_bytes(4096, 4)
+        );
+        const undecedent::SaveMapResult saved =
+            undecedent::save_map_file({sector}, {}, {}, {}, materials, path);
+        expect(saved.ok, "oversized material texture map should save");
+        expect(
+            saved.message.find("Capped material texture") != std::string::npos,
+            "oversized material texture save should report cap warning"
+        );
+        const undecedent::LoadMapResult loaded = undecedent::load_map_file(path);
+        expect(loaded.ok, "oversized material texture map should load");
+        const undecedent::MaterialSlot slot = undecedent::material_slot(loaded.material_library, 6);
+        const undecedent::MaterialTextureSource& capped =
+            undecedent::material_texture_source(slot, undecedent::MaterialTextureChannel::Albedo);
+        expect(
+            capped.codec == undecedent::MaterialTextureImageCodec::JpegXl,
+            "capped material texture should store as JPEG XL"
+        );
+        undecedent::DecodedTextureImage decoded;
+        std::string decode_message;
+        expect(
+            undecedent::decode_texture_image_bytes(capped.codec, capped.bytes, capped.name, decoded, decode_message),
+            "capped material texture should decode after load"
+        );
+        expect(decoded.width == 2048, "capped material texture width should be limited to 2048");
+        expect(decoded.height == 2, "capped material texture should preserve aspect ratio");
         std::filesystem::remove(path);
     }
 

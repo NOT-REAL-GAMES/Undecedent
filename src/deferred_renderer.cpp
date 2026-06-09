@@ -335,6 +335,30 @@ float evsm_visibility(vec2 moments, float receiver_depth, float depth_bias) {
     float p_max = variance / (variance + (d * d));
     return min(reduce_light_bleeding(p_max), hard_visibility);
 }
+float evsm_filtered_visibility(
+    sampler2D moments_texture,
+    vec2 atlas_uv,
+    vec4 rect,
+    float texel,
+    float receiver_depth,
+    float depth_bias,
+    float filter_radius
+) {
+    vec2 min_uv = rect.xy + vec2(texel);
+    vec2 max_uv = rect.xy + rect.zw - vec2(texel);
+    vec2 step_uv = vec2(texel * filter_radius);
+    float visibility = 0.0;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2(-1.0, -1.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.0625;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2( 0.0, -1.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.125;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2( 1.0, -1.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.0625;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2(-1.0,  0.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.125;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.25;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2( 1.0,  0.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.125;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2(-1.0,  1.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.0625;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2( 0.0,  1.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.125;
+    visibility += evsm_visibility(texture(moments_texture, clamp(atlas_uv + vec2( 1.0,  1.0) * step_uv, min_uv, max_uv)).rg, receiver_depth, depth_bias) * 0.0625;
+    return visibility;
+}
 float point_shadow_visibility(int light_index, vec3 light_vector, float light_distance, float range) {
     if (!uPointShadowsEnabled || uPointLights[light_index].shadow_flags.x < 0.5 || range <= 1.0) {
         return 1.0;
@@ -363,8 +387,15 @@ float point_shadow_visibility(int light_index, vec3 light_vector, float light_di
     vec4 rect = uPointShadowFaces[shadow_index].rect;
     vec2 atlas_span = max(rect.zw - vec2(POINT_SHADOW_ATLAS_TEXEL * 2.0), vec2(0.0));
     vec2 atlas_uv = rect.xy + vec2(POINT_SHADOW_ATLAS_TEXEL) + (projected.xy * atlas_span);
-    vec2 moments = texture(uPointShadowAtlas, atlas_uv).rg;
-    return evsm_visibility(moments, receiver_depth, depth_bias);
+    return evsm_filtered_visibility(
+        uPointShadowAtlas,
+        atlas_uv,
+        rect,
+        POINT_SHADOW_ATLAS_TEXEL,
+        receiver_depth,
+        depth_bias,
+        1.25
+    );
 }
 float sun_shadow_cascade_visibility(int cascade_index, vec3 world_position) {
     vec4 clip = uSunShadowMatrices[cascade_index] * vec4(world_position, 1.0);
@@ -377,8 +408,15 @@ float sun_shadow_cascade_visibility(int cascade_index, vec3 world_position) {
     vec4 rect = uSunShadowRects[cascade_index];
     vec2 atlas_span = max(rect.zw - vec2(SUN_SHADOW_ATLAS_TEXEL * 2.0), vec2(0.0));
     vec2 atlas_uv = rect.xy + vec2(SUN_SHADOW_ATLAS_TEXEL) + (projected.xy * atlas_span);
-    vec2 moments = texture(uSunShadowMoments, atlas_uv).rg;
-    return evsm_visibility(moments, projected.z, SUN_SHADOW_DEPTH_BIAS);
+    return evsm_filtered_visibility(
+        uSunShadowMoments,
+        atlas_uv,
+        rect,
+        SUN_SHADOW_ATLAS_TEXEL,
+        projected.z,
+        SUN_SHADOW_DEPTH_BIAS,
+        1.5
+    );
 }
 float sun_shadow_visibility(vec3 world_position, float camera_forward_distance) {
     if (!uSunEnabled || !uSunShadowEnabled) {

@@ -32,6 +32,7 @@ constexpr std::uint32_t kChunkHeaderSize = 32;
 constexpr std::uint32_t kChunkDirectoryEntrySize = 56;
 constexpr float kSparseDisplacementEpsilon = 0.001F;
 constexpr std::uint64_t kMaxEmbeddedTexturePayload = 256ULL * 1024ULL * 1024ULL;
+constexpr int kMaxStoredMaterialTextureDimension = 2048;
 
 constexpr std::uint32_t fourcc(const char a, const char b, const char c, const char d) {
     return static_cast<std::uint32_t>(static_cast<unsigned char>(a)) |
@@ -950,6 +951,115 @@ bool valid_texture_payload_compression(const std::uint32_t codec) {
         codec == static_cast<std::uint32_t>(TexturePayloadCompression::XzLzma2);
 }
 
+std::uint8_t bilinear_sample_channel(
+    const DecodedTextureImage& image,
+    const float source_x,
+    const float source_y,
+    const int channel
+) {
+    constexpr int kChannels = 4;
+    const float clamped_x = std::clamp(source_x, 0.0F, static_cast<float>(image.width - 1));
+    const float clamped_y = std::clamp(source_y, 0.0F, static_cast<float>(image.height - 1));
+    const int x0 = static_cast<int>(std::floor(clamped_x));
+    const int y0 = static_cast<int>(std::floor(clamped_y));
+    const int x1 = std::min(x0 + 1, image.width - 1);
+    const int y1 = std::min(y0 + 1, image.height - 1);
+    const float tx = clamped_x - static_cast<float>(x0);
+    const float ty = clamped_y - static_cast<float>(y0);
+    const auto pixel = [&image, channel](const int x, const int y) {
+        return static_cast<float>(image.rgba[
+            ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
+                static_cast<std::size_t>(x)) *
+                kChannels +
+            static_cast<std::size_t>(channel)
+        ]);
+    };
+
+    const float top = pixel(x0, y0) + ((pixel(x1, y0) - pixel(x0, y0)) * tx);
+    const float bottom = pixel(x0, y1) + ((pixel(x1, y1) - pixel(x0, y1)) * tx);
+    return static_cast<std::uint8_t>(std::clamp(top + ((bottom - top) * ty), 0.0F, 255.0F));
+}
+
+DecodedTextureImage resize_texture_to_max_dimension(const DecodedTextureImage& image, const int max_dimension) {
+    constexpr int kChannels = 4;
+    if (image.width <= max_dimension && image.height <= max_dimension) {
+        return image;
+    }
+
+    const float scale = std::min(
+        static_cast<float>(max_dimension) / static_cast<float>(image.width),
+        static_cast<float>(max_dimension) / static_cast<float>(image.height)
+    );
+    DecodedTextureImage resized;
+    resized.width = std::max(1, static_cast<int>(std::round(static_cast<float>(image.width) * scale)));
+    resized.height = std::max(1, static_cast<int>(std::round(static_cast<float>(image.height) * scale)));
+    resized.rgba.resize(
+        static_cast<std::size_t>(resized.width) *
+        static_cast<std::size_t>(resized.height) *
+        kChannels
+    );
+
+    const float inv_scale_x = static_cast<float>(image.width) / static_cast<float>(resized.width);
+    const float inv_scale_y = static_cast<float>(image.height) / static_cast<float>(resized.height);
+    for (int y = 0; y < resized.height; ++y) {
+        const float source_y = (static_cast<float>(y) + 0.5F) * inv_scale_y - 0.5F;
+        for (int x = 0; x < resized.width; ++x) {
+            const float source_x = (static_cast<float>(x) + 0.5F) * inv_scale_x - 0.5F;
+            const std::size_t destination =
+                ((static_cast<std::size_t>(y) * static_cast<std::size_t>(resized.width)) +
+                    static_cast<std::size_t>(x)) *
+                kChannels;
+            for (int channel = 0; channel < kChannels; ++channel) {
+                resized.rgba[destination + static_cast<std::size_t>(channel)] =
+                    bilinear_sample_channel(image, source_x, source_y, channel);
+            }
+        }
+    }
+
+    return resized;
+}
+
+void cap_material_texture_candidate_for_save(
+    const MaterialTextureSource& source,
+    std::vector<std::uint8_t>& candidate_bytes,
+    MaterialTextureImageCodec& candidate_codec,
+    std::vector<std::string>& warnings
+) {
+    if (candidate_bytes.empty()) {
+        return;
+    }
+
+    DecodedTextureImage image;
+    std::string message;
+    const std::string label = source.name.empty()
+        ? source.path
+        : source.name;
+    if (!decode_texture_image_bytes(candidate_codec, candidate_bytes, label, image, message)) {
+        return;
+    }
+    if (image.width <= kMaxStoredMaterialTextureDimension &&
+        image.height <= kMaxStoredMaterialTextureDimension) {
+        return;
+    }
+
+    const DecodedTextureImage resized =
+        resize_texture_to_max_dimension(image, kMaxStoredMaterialTextureDimension);
+    std::vector<std::uint8_t> capped_bytes;
+    if (!encode_jpeg_xl_rgba(resized, true, 100, capped_bytes, message)) {
+        warnings.push_back("Could not cap material texture '" + label + "': " + message);
+        return;
+    }
+
+    warnings.push_back(
+        "Capped material texture '" + label + "' from " +
+        std::to_string(image.width) + "x" + std::to_string(image.height) +
+        " to " + std::to_string(resized.width) + "x" + std::to_string(resized.height) +
+        " for .udmap storage."
+    );
+    candidate_bytes = std::move(capped_bytes);
+    candidate_codec = MaterialTextureImageCodec::JpegXl;
+}
+
 void choose_material_texture_storage(
     const MaterialTextureSource& source,
     std::vector<std::uint8_t>& candidate_bytes,
@@ -958,6 +1068,7 @@ void choose_material_texture_storage(
 ) {
     candidate_bytes = source.bytes;
     candidate_codec = source.codec;
+    cap_material_texture_candidate_for_save(source, candidate_bytes, candidate_codec, warnings);
     if (source.storage_mode == MaterialTextureStorageMode::SourceBytes) {
         return;
     }
@@ -967,7 +1078,7 @@ void choose_material_texture_storage(
     const std::string label = source.name.empty()
         ? source.path
         : source.name;
-    if (!decode_texture_image_bytes(source.codec, source.bytes, label, image, message)) {
+    if (!decode_texture_image_bytes(candidate_codec, candidate_bytes, label, image, message)) {
         warnings.push_back("Could not decode material texture for JPEG XL save: " + message);
         return;
     }

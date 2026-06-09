@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -19,6 +20,48 @@ namespace {
 
 constexpr int kMaterialTextureSize = 512;
 constexpr int kMaterialTextureChannels = 4;
+constexpr GLenum kTextureMaxAnisotropyExt = 0x84FE;
+constexpr GLenum kMaxTextureMaxAnisotropyExt = 0x84FF;
+constexpr float kRequestedMaterialAnisotropy = 16.0F;
+
+bool gl_extension_supported(const char* extension_name) {
+    if (glGetIntegerv == nullptr || glGetStringi == nullptr || extension_name == nullptr) {
+        return false;
+    }
+
+    GLint extension_count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &extension_count);
+    for (GLint i = 0; i < extension_count; ++i) {
+        const auto* extension = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+        if (extension != nullptr && std::strcmp(extension, extension_name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+float material_texture_anisotropy() {
+    static bool initialized = false;
+    static float anisotropy = 1.0F;
+    if (initialized) {
+        return anisotropy;
+    }
+    initialized = true;
+
+    if (glGetFloatv == nullptr || glTexParameterf == nullptr ||
+        (!gl_extension_supported("GL_EXT_texture_filter_anisotropic") &&
+            !gl_extension_supported("GL_ARB_texture_filter_anisotropic"))) {
+        return anisotropy;
+    }
+
+    GLfloat driver_max = 1.0F;
+    glGetFloatv(kMaxTextureMaxAnisotropyExt, &driver_max);
+    anisotropy = std::clamp(static_cast<float>(driver_max), 1.0F, kRequestedMaterialAnisotropy);
+    if (anisotropy > 1.0F) {
+        std::cout << "Material anisotropic filtering: " << anisotropy << "x\n";
+    }
+    return anisotropy;
+}
 
 std::uint8_t byte_from_unit(const float value) {
     const float clamped = std::clamp(value, 0.0F, 1.0F);
@@ -235,6 +278,10 @@ bool ensure_material_texture_array(MaterialTextureArray& textures, const Materia
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        const float anisotropy = material_texture_anisotropy();
+        if (anisotropy > 1.0F) {
+            glTexParameterf(GL_TEXTURE_2D_ARRAY, kTextureMaxAnisotropyExt, anisotropy);
+        }
         glTexImage3D(
             GL_TEXTURE_2D_ARRAY,
             0,

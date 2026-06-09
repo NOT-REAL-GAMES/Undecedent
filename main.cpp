@@ -208,6 +208,7 @@ struct ProfilerDisplay {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double texture_upload_ms = 0.0;
     double gbuffer_ms = 0.0;
     double shadow_pack_upload_ms = 0.0;
     double shadow_ms = 0.0;
@@ -237,6 +238,7 @@ struct ProfilerAccumulator {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double texture_upload_ms = 0.0;
     double gbuffer_ms = 0.0;
     double shadow_pack_upload_ms = 0.0;
     double shadow_ms = 0.0;
@@ -262,6 +264,7 @@ struct BenchmarkAccumulator {
     double events_ms = 0.0;
     double update_ms = 0.0;
     double render_ms = 0.0;
+    double texture_upload_ms = 0.0;
     double gbuffer_ms = 0.0;
     double shadow_pack_upload_ms = 0.0;
     double shadow_ms = 0.0;
@@ -982,6 +985,7 @@ void print_benchmark_report(
         << " events=" << format_ms(accumulator.events_ms * inv_frames) << "ms"
         << " update=" << format_ms(accumulator.update_ms * inv_frames) << "ms"
         << " render=" << format_ms(accumulator.render_ms * inv_frames) << "ms"
+        << " texup=" << format_ms(accumulator.texture_upload_ms * inv_frames) << "ms"
         << " gbuf=" << format_ms(accumulator.gbuffer_ms * inv_frames) << "ms"
         << " light=" << format_ms(accumulator.lighting_ms * inv_frames) << "ms"
         << " shpack=" << format_ms(accumulator.shadow_pack_upload_ms * inv_frames) << "ms"
@@ -1479,6 +1483,7 @@ void draw_profiler_overlay(
         "EVENTS " + format_ms(profiler.events_ms) + "MS",
         "UPDATE " + format_ms(profiler.update_ms) + "MS",
         "RENDER " + format_ms(profiler.render_ms) + "MS",
+        "TEXUP " + format_ms(profiler.texture_upload_ms) + "MS",
         "GBUF " + format_ms(profiler.gbuffer_ms) + "MS",
         "LIGHT " + format_ms(profiler.lighting_ms) + "MS",
         "SHPACK " + format_ms(profiler.shadow_pack_upload_ms) + "MS",
@@ -1794,6 +1799,7 @@ int main() {
         double events_ms = 0.0;
         double update_ms = 0.0;
         double render_ms = 0.0;
+        double texture_upload_ms = 0.0;
         double gbuffer_ms = 0.0;
         double shadow_pack_upload_ms = 0.0;
         double shadow_ms = 0.0;
@@ -2741,7 +2747,9 @@ int main() {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
         if (runtime_view_now) {
+            const Uint64 texture_upload_start_ticks = SDL_GetTicksNS();
             undecedent::ensure_material_texture_array(material_textures, editor_world.material_library);
+            texture_upload_ms = ticks_to_ms(texture_upload_start_ticks, SDL_GetTicksNS());
         }
 
         if (editor_2d_now) {
@@ -2880,6 +2888,7 @@ int main() {
         profiler_accumulator.events_ms += events_ms;
         profiler_accumulator.update_ms += update_ms;
         profiler_accumulator.render_ms += render_ms;
+        profiler_accumulator.texture_upload_ms += texture_upload_ms;
         profiler_accumulator.gbuffer_ms += gbuffer_ms;
         profiler_accumulator.shadow_pack_upload_ms += shadow_pack_upload_ms;
         profiler_accumulator.shadow_ms += shadow_ms;
@@ -2898,6 +2907,7 @@ int main() {
             benchmark_accumulator.events_ms += events_ms;
             benchmark_accumulator.update_ms += update_ms;
             benchmark_accumulator.render_ms += render_ms;
+            benchmark_accumulator.texture_upload_ms += texture_upload_ms;
             benchmark_accumulator.gbuffer_ms += gbuffer_ms;
             benchmark_accumulator.shadow_pack_upload_ms += shadow_pack_upload_ms;
             benchmark_accumulator.shadow_ms += shadow_ms;
@@ -2931,6 +2941,7 @@ int main() {
             displayed_profiler.events_ms = profiler_accumulator.events_ms * inv_frames;
             displayed_profiler.update_ms = profiler_accumulator.update_ms * inv_frames;
             displayed_profiler.render_ms = profiler_accumulator.render_ms * inv_frames;
+            displayed_profiler.texture_upload_ms = profiler_accumulator.texture_upload_ms * inv_frames;
             displayed_profiler.gbuffer_ms = profiler_accumulator.gbuffer_ms * inv_frames;
             displayed_profiler.shadow_pack_upload_ms = profiler_accumulator.shadow_pack_upload_ms * inv_frames;
             displayed_profiler.shadow_ms = profiler_accumulator.shadow_ms * inv_frames;
